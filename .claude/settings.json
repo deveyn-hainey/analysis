@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git check-ignore *)",
+      "Bash(git -C /Users/deveynhainey/Projects/analysis status --short)",
+      "Bash(git -C /Users/deveynhainey/Projects/analysis status)"
+    ]
+  }
+}
