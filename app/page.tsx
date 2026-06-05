@@ -15,13 +15,17 @@ import {
   Cpu,
   BarChart3,
 } from "lucide-react";
-import type { AnalyzeRequest, MatchAnalysis } from "@/lib/types";
+import type { AnalyzeRequest, AnalyzeFrameRequest, FrameData, MatchAnalysis } from "@/lib/types";
 
 const ACCEPTED_TYPES = ["video/mp4", "video/webm", "video/ogg", "video/quicktime"];
 
+/** Target ~12 frames regardless of clip length. Min interval 2 s, max 10 s. */
+function frameInterval(durationSeconds: number): number {
+  return Math.max(2, Math.min(10, Math.round(durationSeconds / 12)));
+}
+
 function extractFrames(
   file: File,
-  intervalSeconds = 8,
   onProgress?: (pct: number) => void
 ): Promise<Array<{ base64: string; timestamp: number }>> {
   return new Promise((resolve, reject) => {
@@ -35,9 +39,10 @@ function extractFrames(
 
     video.onloadedmetadata = () => {
       const duration = video.duration;
+      const interval = frameInterval(duration);
       const timestamps: number[] = [];
-      for (let t = 0; t < duration; t += intervalSeconds) {
-        timestamps.push(t);
+      for (let t = 0; t < duration; t += interval) {
+        timestamps.push(+t.toFixed(1));
       }
 
       canvas.width = 640;
@@ -57,7 +62,7 @@ function extractFrames(
         ctx.drawImage(video, 0, 0, 640, 360);
         const base64 = canvas.toDataURL("image/jpeg", 0.7).split(",")[1];
         frames.push({ base64, timestamp: timestamps[idx] });
-        onProgress?.(Math.round(((idx + 1) / timestamps.length) * 50));
+        onProgress?.(Math.round(((idx + 1) / timestamps.length) * 30));
         idx++;
         seekNext();
       };
@@ -73,8 +78,9 @@ function extractFrames(
 export default function HomePage() {
   const router = useRouter();
   const [dragOver, setDragOver] = useState(false);
-  const [status, setStatus] = useState<"idle" | "extracting" | "analyzing" | "done" | "error">("idle");
+  const [status, setStatus] = useState<"idle" | "extracting" | "analyzing" | "summarizing" | "done" | "error">("idle");
   const [progress, setProgress] = useState(0);
+  const [statusDetail, setStatusDetail] = useState("");
   const [errorMsg, setErrorMsg] = useState("");
 
   const handleFile = useCallback(
@@ -87,27 +93,61 @@ export default function HomePage() {
 
       setStatus("extracting");
       setProgress(5);
+      setStatusDetail("Reading video…");
 
       try {
-        const frames = await extractFrames(file, 8, (pct) => setProgress(pct));
-        setStatus("analyzing");
-        setProgress(55);
-
-        const payload: AnalyzeRequest = { frames };
-        const res = await fetch("/api/analyze", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
+        // Step 1: extract frames (adaptive rate targets ~12 frames)
+        const rawFrames = await extractFrames(file, (pct) => {
+          setProgress(5 + pct);
+          setStatusDetail("Capturing keyframes…");
         });
 
-        setProgress(90);
+        // Step 2: analyse each frame individually so progress updates after every call
+        setStatus("analyzing");
+        const analyzedFrames: FrameData[] = [];
 
-        if (!res.ok) {
-          const err = await res.json().catch(() => ({ error: "Unknown error" }));
-          throw new Error((err as { error?: string }).error ?? "Analysis failed");
+        for (let i = 0; i < rawFrames.length; i++) {
+          setStatusDetail(`Analysing frame ${i + 1} of ${rawFrames.length}…`);
+          setProgress(35 + Math.round(((i) / rawFrames.length) * 50));
+
+          const payload: AnalyzeFrameRequest = {
+            base64: rawFrames[i].base64,
+            timestamp: rawFrames[i].timestamp,
+            frameIndex: i,
+          };
+
+          const res = await fetch("/api/analyze/frame", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+
+          if (!res.ok) {
+            const err = await res.json().catch(() => ({ error: "Unknown error" }));
+            throw new Error((err as { error?: string }).error ?? "Frame analysis failed");
+          }
+
+          analyzedFrames.push((await res.json()) as FrameData);
+          setProgress(35 + Math.round(((i + 1) / rawFrames.length) * 50));
         }
 
-        const analysis = (await res.json()) as MatchAnalysis;
+        // Step 3: summarise all frames into team stats + insights
+        setStatus("summarizing");
+        setStatusDetail("Building match insights…");
+        setProgress(88);
+
+        const sumRes = await fetch("/api/analyze/summarize", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ frames: analyzedFrames }),
+        });
+
+        if (!sumRes.ok) {
+          const err = await sumRes.json().catch(() => ({ error: "Unknown error" }));
+          throw new Error((err as { error?: string }).error ?? "Summarize failed");
+        }
+
+        const analysis = (await sumRes.json()) as MatchAnalysis;
         sessionStorage.setItem("matchAnalysis", JSON.stringify(analysis));
         setProgress(100);
         setStatus("done");
@@ -145,7 +185,7 @@ export default function HomePage() {
     }
   }, [router]);
 
-  const isProcessing = status === "extracting" || status === "analyzing";
+  const isProcessing = status === "extracting" || status === "analyzing" || status === "summarizing";
 
   return (
     <div className="min-h-screen bg-[#0d1117]">
@@ -216,17 +256,17 @@ export default function HomePage() {
               <div className="w-14 h-14 rounded-full bg-emerald-500/10 flex items-center justify-center mx-auto mb-5">
                 <Cpu className="w-7 h-7 text-emerald-400 animate-pulse" />
               </div>
-              <h3 className="text-lg font-semibold mb-2 text-[#e6edf3]">
-                {status === "extracting" ? "Extracting frames…" : "Analysing with Claude Vision…"}
-              </h3>
-              <p className="text-[#8b949e] text-sm mb-6">
+              <h3 className="text-lg font-semibold mb-1 text-[#e6edf3]">
                 {status === "extracting"
-                  ? "Capturing keyframes from your video"
-                  : "Detecting players, positions, and key events"}
-              </p>
+                  ? "Reading video…"
+                  : status === "summarizing"
+                  ? "Building insights…"
+                  : "Analysing with Claude Vision"}
+              </h3>
+              <p className="text-[#8b949e] text-sm mb-6 min-h-[20px]">{statusDetail}</p>
               <div className="h-2 bg-[#30363d] rounded-full overflow-hidden">
                 <div
-                  className="h-full bg-gradient-to-r from-emerald-500 to-blue-500 rounded-full transition-all duration-500"
+                  className="h-full bg-gradient-to-r from-emerald-500 to-blue-500 rounded-full transition-all duration-300"
                   style={{ width: `${progress}%` }}
                 />
               </div>
@@ -300,13 +340,13 @@ export default function HomePage() {
               step: "01",
               icon: Film,
               title: "Upload footage",
-              desc: "Drop any 2–3 minute match clip. The browser extracts keyframes every 8 seconds for analysis.",
+              desc: "Drop any match clip. The browser automatically extracts ~12 keyframes scaled to your clip length — short clips get denser coverage.",
             },
             {
               step: "02",
               icon: Cpu,
               title: "AI vision analysis",
-              desc: "Claude Vision identifies players, positions, and actions in each frame. Structured JSON is built from the results.",
+              desc: "Each frame is sent to Claude Vision individually, giving you live progress. Player positions, actions, and events are extracted as structured JSON.",
             },
             {
               step: "03",

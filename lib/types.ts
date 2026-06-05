@@ -58,6 +58,8 @@ export interface FrameData {
   ballPosition?: Position;
   events: MatchEvent[];
   possession: TeamId | "contested";
+  // Player with closest contact to the ball — used for cross-frame pass counting
+  possessingPlayer?: { team: TeamId; playerId: string };
 }
 
 export interface TeamStats {
@@ -106,8 +108,20 @@ export interface MatchAnalysis {
   processingMethod: "ai" | "demo";
 }
 
-// Payload sent from client to /api/analyze
+// Payload sent from client to /api/analyze (demo only)
 export interface AnalyzeRequest {
   frames: Array<{ base64: string; timestamp: number }>;
   demo?: boolean;
+}
+
+// Payload for per-frame analysis
+export interface AnalyzeFrameRequest {
+  base64: string;
+  timestamp: number;
+  frameIndex: number;
+}
+
+// Payload for final summarize step
+export interface SummarizeRequest {
+  frames: FrameData[];
 }
