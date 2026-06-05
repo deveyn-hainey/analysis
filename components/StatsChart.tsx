@@ -18,6 +18,18 @@ interface StatsChartProps {
 }
 
 export default function StatsChart({ homeTeam, awayTeam }: StatsChartProps) {
+  const { passes: hp, shots: hs, tackles: ht, fouls: hf, corners: hc } = homeTeam.stats;
+  const { passes: ap, shots: as_, tackles: at, fouls: af, corners: ac } = awayTeam.stats;
+  const totalActivity = hp + hs + ht + hf + hc + ap + as_ + at + af + ac;
+
+  if (totalActivity === 0) {
+    return (
+      <div className="flex items-center justify-center h-[260px] text-[#8b949e] text-sm">
+        No action events detected in this clip. Try uploading a longer clip or one with more visible ball activity.
+      </div>
+    );
+  }
+
   const data = [
     {
       name: "Passes",
