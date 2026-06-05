@@ -102,34 +102,49 @@ export default function HomePage() {
           setStatusDetail("Capturing keyframes…");
         });
 
-        // Step 2: analyse each frame individually so progress updates after every call
+        // Step 2: analyse all frames concurrently — progress counter updates as each one resolves
         setStatus("analyzing");
-        const analyzedFrames: FrameData[] = [];
+        setStatusDetail(`Sending ${rawFrames.length} frames to Claude Vision…`);
+        setProgress(36);
 
-        for (let i = 0; i < rawFrames.length; i++) {
-          setStatusDetail(`Analysing frame ${i + 1} of ${rawFrames.length}…`);
-          setProgress(35 + Math.round(((i) / rawFrames.length) * 50));
-
-          const payload: AnalyzeFrameRequest = {
-            base64: rawFrames[i].base64,
-            timestamp: rawFrames[i].timestamp,
-            frameIndex: i,
-          };
-
-          const res = await fetch("/api/analyze/frame", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload),
-          });
-
-          if (!res.ok) {
-            const err = await res.json().catch(() => ({ error: "Unknown error" }));
-            throw new Error((err as { error?: string }).error ?? "Frame analysis failed");
-          }
-
-          analyzedFrames.push((await res.json()) as FrameData);
-          setProgress(35 + Math.round(((i + 1) / rawFrames.length) * 50));
-        }
+        let completed = 0;
+        const analyzedFrames = await Promise.all(
+          rawFrames.map(async (rawFrame, i) => {
+            const payload: AnalyzeFrameRequest = {
+              base64: rawFrame.base64,
+              timestamp: rawFrame.timestamp,
+              frameIndex: i,
+            };
+            try {
+              const res = await fetch("/api/analyze/frame", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload),
+              });
+              if (!res.ok) {
+                const err = await res.json().catch(() => ({ error: "Unknown" }));
+                throw new Error((err as { error?: string }).error ?? "Frame failed");
+              }
+              const data = (await res.json()) as FrameData;
+              completed++;
+              setProgress(36 + Math.round((completed / rawFrames.length) * 50));
+              setStatusDetail(`Analysed ${completed} of ${rawFrames.length} frames…`);
+              return data;
+            } catch {
+              // Return an empty frame so one bad frame doesn't abort everything
+              completed++;
+              setProgress(36 + Math.round((completed / rawFrames.length) * 50));
+              setStatusDetail(`Analysed ${completed} of ${rawFrames.length} frames…`);
+              return {
+                frameIndex: i,
+                timestamp: rawFrame.timestamp,
+                players: [],
+                events: [],
+                possession: "contested" as const,
+              } as FrameData;
+            }
+          })
+        );
 
         // Step 3: summarise all frames into team stats + insights
         setStatus("summarizing");
