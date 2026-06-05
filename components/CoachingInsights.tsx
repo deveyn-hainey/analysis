@@ -5,6 +5,8 @@ import { TrendingUp, Shield, Activity, Compass, Zap } from "lucide-react";
 
 interface CoachingInsightsProps {
   insights: CoachingInsight[];
+  homeTeamName: string;
+  awayTeamName: string;
 }
 
 const CATEGORY_CONFIG = {
@@ -22,7 +24,7 @@ const PRIORITY_CONFIG = {
   low: { label: "Low", color: "text-slate-400", bg: "bg-slate-400/10" },
 };
 
-export default function CoachingInsights({ insights }: CoachingInsightsProps) {
+export default function CoachingInsights({ insights, homeTeamName, awayTeamName }: CoachingInsightsProps) {
   if (!insights.length) {
     return (
       <div className="text-center text-[#8b949e] text-sm py-8">
@@ -72,9 +74,9 @@ export default function CoachingInsights({ insights }: CoachingInsightsProps) {
                 }`}
               >
                 {insight.affectedTeam === "home"
-                  ? "Eagles FC"
+                  ? homeTeamName
                   : insight.affectedTeam === "away"
-                  ? "City United"
+                  ? awayTeamName
                   : "Both teams"}
               </span>
             </div>

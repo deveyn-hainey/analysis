@@ -32,16 +32,22 @@ Return ONLY valid JSON — no markdown, no code fences, no explanation:
 - Player diving/diving save → "save"
 - If you set a player's action to "passing", "shooting", or "tackling" you MUST include a matching event.
 
-── GOAL DETECTION — check ALL of these ──
-Report a "goal" event if ANY of the following are visible, even if you missed the exact crossing moment:
+── SCOREBOARD (highest priority for scoring) ──
+If ANY score overlay, graphic, or scoreboard is visible anywhere in the frame:
+- Read the exact score (e.g. "1-0", "2-1")
+- Add a "goal" event for the team that is leading or that has more goals than 0-0
+- Set description to: "Scoreboard shows [score] — [team] goal detected"
+- This is the most reliable signal — always check for it first.
+
+── GOAL DETECTION — also check these ──
+Report a "goal" event if ANY of the following are visible (even if you missed the crossing moment):
 1. Ball is visually inside or touching the net/goal frame
-2. Attacking players are celebrating — arms raised, jumping, embracing teammates
-3. Goalkeeper is on the ground, looking defeated, or retrieving ball from net
-4. Scoreboard in frame shows a recent score change
-5. Players surrounding the goal in a post-goal cluster
+2. Attacking players celebrating — arms raised, jumping, embracing teammates
+3. Goalkeeper on the ground, dejected, or retrieving ball from net
+4. Players clustered around the goal in a post-goal huddle
 
 ── PASS COUNTING ──
-A pass is a deliberate ball transfer from one player to a teammate. If you can see the ball has just left a player's foot toward a teammate, that is one pass. Do not count the same pass multiple times.`;
+A pass is a deliberate ball transfer to a teammate. If the ball has clearly left a player's foot toward a teammate, that is one pass. Do not count the same pass multiple times.`;
 
 interface RawFrameEvent {
   type: string;

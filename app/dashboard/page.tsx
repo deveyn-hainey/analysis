@@ -300,7 +300,11 @@ function DashboardContent() {
               <p className="text-xs text-[#8b949e]">AI-generated performance analysis and recommendations</p>
             </div>
           </div>
-          <CoachingInsights insights={analysis.insights} />
+          <CoachingInsights
+            insights={analysis.insights}
+            homeTeamName={analysis.homeTeam.name}
+            awayTeamName={analysis.awayTeam.name}
+          />
         </div>
       </main>
 

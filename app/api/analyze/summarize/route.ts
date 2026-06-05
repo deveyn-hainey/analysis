@@ -29,6 +29,29 @@ function countEventType(events: MatchEvent[], type: string, team?: TeamId) {
 }
 
 /**
+ * Remove duplicate goal events caused by a celebration being visible across
+ * multiple consecutive frames. Two goals for the same team within MIN_GAP
+ * seconds are treated as the same goal — real goals require at least a kickoff
+ * reset before another can be scored.
+ */
+function deduplicateGoals(events: MatchEvent[]): MatchEvent[] {
+  const MIN_GAP = 12; // seconds
+  const nonGoals = events.filter((e) => e.type !== "goal");
+  const goals = events
+    .filter((e) => e.type === "goal")
+    .sort((a, b) => a.timestamp - b.timestamp);
+
+  const deduped: MatchEvent[] = [];
+  for (const goal of goals) {
+    const lastSameTeam = [...deduped].reverse().find((g) => g.team === goal.team);
+    if (!lastSameTeam || goal.timestamp - lastSameTeam.timestamp >= MIN_GAP) {
+      deduped.push(goal);
+    }
+  }
+  return [...nonGoals, ...deduped];
+}
+
+/**
  * Count passes by tracking possession changes across frames.
  * When the possessing player changes to a teammate (same team, different player ID),
  * that transition counts as one pass.
@@ -268,7 +291,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "No frames provided." }, { status: 400 });
     }
 
-    const allEvents = frames.flatMap((f) => f.events);
+    const allEvents = deduplicateGoals(frames.flatMap((f) => f.events));
 
     const homeTeam = buildTeamAnalysis("home", frames, allEvents);
     const awayTeam = buildTeamAnalysis("away", frames, allEvents);
