@@ -53,13 +53,22 @@ Compare positions between the two frames to detect:
 - Player on ground after contact → "foul"
 RULE: If you assign "passing", "shooting", or "tackling" as a player action, you MUST include the matching event.
 
-── PLAYERS ──
-- Identify ALL visible players. Broadcast frames typically show 10–22 players.
-- x/y: 0–100 percent of field width/height (0,0 = top-left, 100,100 = bottom-right)
-- team: assign one jersey colour as "home", the other "away". BE CONSISTENT across both frames.
+── PLAYERS (EXHAUSTIVE — BOTH TEAMS) ──
+SCAN ZONE BY ZONE: left third → centre → right third → near each goal → midfield.
+A full-pitch broadcast typically shows 14–22 figures: ~11 per team + 1–2 officials.
+
+CRITICAL: Include every player from BOTH teams. Do NOT skip the away team because they wear a
+darker jersey colour (red, navy, black, dark blue are all common away colours). If you only list
+one team's players, the analysis is wrong. Aim: ≥10 home players AND ≥10 away players visible.
+
+- id: "h1"…"h11" for home team, "a1"…"a11" for away team.
+- Referees/officials (black kit or fluorescent bib) → EXCLUDE from the player list entirely.
+- x/y: 0–100 percent of pitch width/height (0,0 = top-left, 100,100 = bottom-right)
+- team: label the lighter/more numerous jersey group "home", the other "away". BE CONSISTENT.
 - role: "gk" (nearest own goal line), "def", "mid", "fwd"
 - action: "running"|"standing"|"passing"|"shooting"|"tackling"|"jumping"|"goalkeeping"|"dribbling"
 - possessingPlayerId: id of the player whose foot is touching or nearest to the ball
+- number: shirt number if legible, else 0
 
 ── PASS COUNTING ──
 One pass = ball visibly leaving a player's foot toward a teammate. Never double-count the same pass.`;

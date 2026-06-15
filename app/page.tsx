@@ -14,8 +14,54 @@ import {
   Cpu,
   BarChart3,
 } from "lucide-react";
-import type { AnalyzeFrameRequest, FrameData, MatchAnalysis } from "@/lib/types";
+import type { AnalyzeFrameRequest, FrameData, MatchAnalysis, Player, MatchEvent } from "@/lib/types";
 import { videoStore } from "@/lib/videoStore";
+import { frameImageStore } from "@/lib/frameImageStore";
+
+/** Merge two frame analysis passes: union of players/events, averaged positions/ball. */
+function mergeFrameResults(f1: FrameData, f2: FrameData): FrameData {
+  const playerMap = new Map<string, Player>();
+  for (const p of [...f1.players, ...f2.players]) {
+    if (playerMap.has(p.id)) {
+      const prev = playerMap.get(p.id)!;
+      playerMap.set(p.id, {
+        ...prev,
+        position: {
+          x: (prev.position.x + p.position.x) / 2,
+          y: (prev.position.y + p.position.y) / 2,
+        },
+      });
+    } else {
+      playerMap.set(p.id, p);
+    }
+  }
+
+  const seenEvent = new Set<string>();
+  const mergedEvents: MatchEvent[] = [];
+  for (const e of [...f1.events, ...f2.events]) {
+    const key = `${e.type}-${e.team ?? ""}`;
+    if (!seenEvent.has(key)) {
+      seenEvent.add(key);
+      mergedEvents.push(e);
+    }
+  }
+
+  const ball =
+    f1.ballPosition && f2.ballPosition
+      ? {
+          x: (f1.ballPosition.x + f2.ballPosition.x) / 2,
+          y: (f1.ballPosition.y + f2.ballPosition.y) / 2,
+        }
+      : f1.ballPosition ?? f2.ballPosition;
+
+  return {
+    ...f1,
+    players: [...playerMap.values()],
+    events: mergedEvents,
+    ballPosition: ball,
+    possession: f1.possession === f2.possession ? f1.possession : f1.possession,
+  };
+}
 
 const ACCEPTED_TYPES = ["video/mp4", "video/webm", "video/ogg", "video/quicktime"];
 
@@ -102,8 +148,12 @@ export default function HomePage() {
           setStatusDetail("Capturing keyframes…");
         });
 
+        // Store images so the dashboard can render actual-frame overlays
+        frameImageStore.clear();
+        rawFrames.forEach((f, i) => frameImageStore.set(i, f.base64));
+
         setStatus("analyzing");
-        setStatusDetail(`Sending ${rawFrames.length} frames to AI…`);
+        setStatusDetail(`Sending ${rawFrames.length} frames to AI (dual-pass)…`);
         setProgress(36);
 
         let completed = 0;
@@ -118,16 +168,31 @@ export default function HomePage() {
               prevTimestamp: prev?.timestamp,
             };
             try {
-              const res = await fetch("/api/analyze/frame", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(payload),
-              });
-              if (!res.ok) {
-                const err = await res.json().catch(() => ({ error: "Unknown" }));
-                throw new Error((err as { error?: string }).error ?? "Frame failed");
-              }
-              const data = (await res.json()) as FrameData;
+              // Two passes in parallel — merge results for consistent event detection
+              const [res1, res2] = await Promise.all([
+                fetch("/api/analyze/frame", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify(payload),
+                }),
+                fetch("/api/analyze/frame", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify(payload),
+                }),
+              ]);
+
+              const [pass1, pass2] = await Promise.all([
+                res1.ok ? (res1.json() as Promise<FrameData>) : Promise.resolve(null),
+                res2.ok ? (res2.json() as Promise<FrameData>) : Promise.resolve(null),
+              ]);
+
+              if (!pass1 && !pass2) throw new Error("Both analysis passes failed");
+              const data =
+                pass1 && pass2
+                  ? mergeFrameResults(pass1, pass2)
+                  : (pass1 ?? pass2)!;
+
               completed++;
               setProgress(36 + Math.round((completed / rawFrames.length) * 50));
               setStatusDetail(`Analysed ${completed} of ${rawFrames.length} frames…`);

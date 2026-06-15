@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import type { MatchAnalysis, FrameData } from "@/lib/types";
 import SoccerField from "@/components/SoccerField";
+import FrameOverlay from "@/components/FrameOverlay";
 import EventTimeline from "@/components/EventTimeline";
 import StatsChart from "@/components/StatsChart";
 import TeamComparison from "@/components/TeamComparison";
@@ -22,6 +23,7 @@ import CoachingInsights from "@/components/CoachingInsights";
 import Heatmap from "@/components/Heatmap";
 import MetricCard from "@/components/MetricCard";
 import { videoStore } from "@/lib/videoStore";
+import { frameImageStore } from "@/lib/frameImageStore";
 
 function formatDuration(s: number) {
   const m = Math.floor(s / 60);
@@ -38,6 +40,7 @@ function DashboardContent() {
   const [selectedFrame, setSelectedFrame] = useState<FrameData | null>(null);
   const [activeHeatmapTeam, setActiveHeatmapTeam] = useState<"home" | "away">("home");
   const [viewMode, setViewMode] = useState<ViewMode>("coach");
+  const [pitchView, setPitchView] = useState<"frame" | "tactical">("frame");
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
 
@@ -73,6 +76,7 @@ function DashboardContent() {
   }
 
   const currentFrame = selectedFrame ?? analysis.frames[0];
+  const frameImage = currentFrame ? frameImageStore.get(currentFrame.frameIndex) : null;
 
   const seekTo = (timestamp: number) => {
     const closest = analysis.frames.reduce((best, f) =>
@@ -259,25 +263,58 @@ function DashboardContent() {
                 )}
 
                 <div className="card p-4">
-                  <div className="flex items-center justify-between mb-3">
-                    <h2 className="text-sm font-semibold text-[#f0fdf4]">Player Positions</h2>
-                    <div className="flex items-center gap-1.5 flex-wrap">
-                      {analysis.frames.map((f) => (
+                  <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+                    <div>
+                      <h2 className="text-sm font-semibold text-[#f0fdf4]">Player Positions</h2>
+                      {currentFrame && (
+                        <p className="text-xs text-[#6b9e6b] mt-0.5">
+                          {currentFrame.players.filter((p) => p.team === "home").length} home ·{" "}
+                          {currentFrame.players.filter((p) => p.team === "away").length} away detected
+                        </p>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <div className="flex rounded-lg border border-[#1c3020] overflow-hidden text-xs">
                         <button
-                          key={f.frameIndex}
-                          onClick={() => setSelectedFrame(f)}
-                          className={`text-xs px-2 py-1 rounded transition-colors ${
-                            selectedFrame?.frameIndex === f.frameIndex
-                              ? "bg-green-400 text-black font-medium"
-                              : "bg-[#142014] text-[#6b9e6b] hover:bg-[#1c3020]"
-                          }`}
+                          onClick={() => setPitchView("frame")}
+                          className={`px-2.5 py-1 transition-colors ${pitchView === "frame" ? "bg-green-400 text-black font-medium" : "text-[#6b9e6b] hover:text-[#f0fdf4]"}`}
                         >
-                          {Math.floor(f.timestamp / 60)}:{String(Math.floor(f.timestamp % 60)).padStart(2, "0")}
+                          Frame
                         </button>
-                      ))}
+                        <button
+                          onClick={() => setPitchView("tactical")}
+                          className={`px-2.5 py-1 transition-colors ${pitchView === "tactical" ? "bg-green-400 text-black font-medium" : "text-[#6b9e6b] hover:text-[#f0fdf4]"}`}
+                        >
+                          Tactical
+                        </button>
+                      </div>
+                      <div className="flex items-center gap-1 flex-wrap">
+                        {analysis.frames.map((f) => (
+                          <button
+                            key={f.frameIndex}
+                            onClick={() => setSelectedFrame(f)}
+                            className={`text-xs px-2 py-1 rounded transition-colors ${
+                              selectedFrame?.frameIndex === f.frameIndex
+                                ? "bg-green-400 text-black font-medium"
+                                : "bg-[#142014] text-[#6b9e6b] hover:bg-[#1c3020]"
+                            }`}
+                          >
+                            {Math.floor(f.timestamp / 60)}:{String(Math.floor(f.timestamp % 60)).padStart(2, "0")}
+                          </button>
+                        ))}
+                      </div>
                     </div>
                   </div>
-                  {currentFrame && <SoccerField frame={currentFrame} />}
+                  {currentFrame && (
+                    pitchView === "frame" && frameImage
+                      ? <FrameOverlay base64={frameImage} players={currentFrame.players} ballPosition={currentFrame.ballPosition} />
+                      : <SoccerField frame={currentFrame} />
+                  )}
+                  {pitchView === "frame" && !frameImage && (
+                    <p className="text-xs text-[#3d5c40] mt-2 text-center italic">
+                      Frame view available after uploading a video — showing tactical view
+                    </p>
+                  )}
                 </div>
               </div>
 
@@ -375,25 +412,58 @@ function DashboardContent() {
                 )}
 
                 <div className="card p-4">
-                  <div className="flex items-center justify-between mb-3">
-                    <h2 className="text-sm font-semibold text-[#f0fdf4]">Player Positions</h2>
-                    <div className="flex items-center gap-1.5 flex-wrap">
-                      {analysis.frames.map((f) => (
+                  <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+                    <div>
+                      <h2 className="text-sm font-semibold text-[#f0fdf4]">Player Positions</h2>
+                      {currentFrame && (
+                        <p className="text-xs text-[#6b9e6b] mt-0.5">
+                          {currentFrame.players.filter((p) => p.team === "home").length} home ·{" "}
+                          {currentFrame.players.filter((p) => p.team === "away").length} away detected
+                        </p>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <div className="flex rounded-lg border border-[#1c3020] overflow-hidden text-xs">
                         <button
-                          key={f.frameIndex}
-                          onClick={() => setSelectedFrame(f)}
-                          className={`text-xs px-2 py-1 rounded transition-colors ${
-                            selectedFrame?.frameIndex === f.frameIndex
-                              ? "bg-green-400 text-black font-medium"
-                              : "bg-[#142014] text-[#6b9e6b] hover:bg-[#1c3020]"
-                          }`}
+                          onClick={() => setPitchView("frame")}
+                          className={`px-2.5 py-1 transition-colors ${pitchView === "frame" ? "bg-green-400 text-black font-medium" : "text-[#6b9e6b] hover:text-[#f0fdf4]"}`}
                         >
-                          {Math.floor(f.timestamp / 60)}:{String(Math.floor(f.timestamp % 60)).padStart(2, "0")}
+                          Frame
                         </button>
-                      ))}
+                        <button
+                          onClick={() => setPitchView("tactical")}
+                          className={`px-2.5 py-1 transition-colors ${pitchView === "tactical" ? "bg-green-400 text-black font-medium" : "text-[#6b9e6b] hover:text-[#f0fdf4]"}`}
+                        >
+                          Tactical
+                        </button>
+                      </div>
+                      <div className="flex items-center gap-1 flex-wrap">
+                        {analysis.frames.map((f) => (
+                          <button
+                            key={f.frameIndex}
+                            onClick={() => setSelectedFrame(f)}
+                            className={`text-xs px-2 py-1 rounded transition-colors ${
+                              selectedFrame?.frameIndex === f.frameIndex
+                                ? "bg-green-400 text-black font-medium"
+                                : "bg-[#142014] text-[#6b9e6b] hover:bg-[#1c3020]"
+                            }`}
+                          >
+                            {Math.floor(f.timestamp / 60)}:{String(Math.floor(f.timestamp % 60)).padStart(2, "0")}
+                          </button>
+                        ))}
+                      </div>
                     </div>
                   </div>
-                  {currentFrame && <SoccerField frame={currentFrame} />}
+                  {currentFrame && (
+                    pitchView === "frame" && frameImage
+                      ? <FrameOverlay base64={frameImage} players={currentFrame.players} ballPosition={currentFrame.ballPosition} />
+                      : <SoccerField frame={currentFrame} />
+                  )}
+                  {pitchView === "frame" && !frameImage && (
+                    <p className="text-xs text-[#3d5c40] mt-2 text-center italic">
+                      Frame view available after uploading a video — showing tactical view
+                    </p>
+                  )}
                 </div>
               </div>
 
