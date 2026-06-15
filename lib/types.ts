@@ -72,6 +72,7 @@ export interface TeamStats {
   fouls: number;
   corners: number;
   goals: number;
+  distanceCovered: number; // approx total meters covered by all players this team
 }
 
 export interface TeamAnalysis {

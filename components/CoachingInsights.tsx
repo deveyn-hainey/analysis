@@ -21,13 +21,13 @@ const PRIORITY_CONFIG = {
   critical: { label: "Critical", color: "text-red-400", bg: "bg-red-400/10" },
   high: { label: "High", color: "text-orange-400", bg: "bg-orange-400/10" },
   medium: { label: "Medium", color: "text-yellow-400", bg: "bg-yellow-400/10" },
-  low: { label: "Low", color: "text-slate-400", bg: "bg-slate-400/10" },
+  low: { label: "Low", color: "text-[#6b9e6b]", bg: "bg-[#142014]" },
 };
 
 export default function CoachingInsights({ insights, homeTeamName, awayTeamName }: CoachingInsightsProps) {
   if (!insights.length) {
     return (
-      <div className="text-center text-[#8b949e] text-sm py-8">
+      <div className="text-center text-[#6b9e6b] text-sm py-8">
         No insights generated yet.
       </div>
     );
@@ -43,22 +43,19 @@ export default function CoachingInsights({ insights, homeTeamName, awayTeamName 
         return (
           <div
             key={insight.id}
-            className={`border rounded-xl p-4 ${cat.border} bg-[#161b22]`}
+            className={`border rounded-xl p-4 ${cat.border} bg-[#0d1a0d]`}
           >
-            {/* Header */}
             <div className="flex items-start justify-between gap-3 mb-3">
               <div className="flex items-center gap-2.5">
                 <div className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 ${cat.bg}`}>
                   <Icon className={`w-4 h-4 ${cat.color}`} />
                 </div>
                 <div>
-                  <h4 className="text-sm font-semibold text-[#e6edf3] leading-tight">{insight.title}</h4>
+                  <h4 className="text-sm font-semibold text-[#f0fdf4] leading-tight">{insight.title}</h4>
                   <div className="flex items-center gap-2 mt-0.5">
                     <span className={`text-xs capitalize ${cat.color}`}>{insight.category}</span>
-                    <span className="text-[#30363d]">·</span>
-                    <span
-                      className={`text-xs px-1.5 py-0.5 rounded-full ${pri.bg} ${pri.color}`}
-                    >
+                    <span className="text-[#1c3020]">·</span>
+                    <span className={`text-xs px-1.5 py-0.5 rounded-full ${pri.bg} ${pri.color}`}>
                       {pri.label}
                     </span>
                   </div>
@@ -67,10 +64,10 @@ export default function CoachingInsights({ insights, homeTeamName, awayTeamName 
               <span
                 className={`text-xs px-2 py-0.5 rounded-full flex-shrink-0 ${
                   insight.affectedTeam === "home"
-                    ? "bg-blue-500/15 text-blue-400"
+                    ? "bg-green-400/15 text-green-400"
                     : insight.affectedTeam === "away"
-                    ? "bg-red-500/15 text-red-400"
-                    : "bg-emerald-500/15 text-emerald-400"
+                    ? "bg-gray-400/15 text-gray-300"
+                    : "bg-green-400/10 text-green-300"
                 }`}
               >
                 {insight.affectedTeam === "home"
@@ -81,16 +78,14 @@ export default function CoachingInsights({ insights, homeTeamName, awayTeamName 
               </span>
             </div>
 
-            {/* Observation */}
             <div className="mb-2">
-              <div className="text-xs font-medium text-[#8b949e] uppercase tracking-wide mb-1">Observation</div>
-              <p className="text-sm text-[#c9d1d9] leading-relaxed">{insight.observation}</p>
+              <div className="text-xs font-medium text-[#6b9e6b] uppercase tracking-wide mb-1">Observation</div>
+              <p className="text-sm text-[#d1fae5] leading-relaxed">{insight.observation}</p>
             </div>
 
-            {/* Recommendation */}
-            <div className="bg-[#0d1117] rounded-lg p-3 border border-[#30363d]">
-              <div className="text-xs font-medium text-emerald-400 uppercase tracking-wide mb-1">Recommendation</div>
-              <p className="text-sm text-[#c9d1d9] leading-relaxed">{insight.recommendation}</p>
+            <div className="bg-[#070e07] rounded-lg p-3 border border-[#1c3020]">
+              <div className="text-xs font-medium text-green-400 uppercase tracking-wide mb-1">Recommendation</div>
+              <p className="text-sm text-[#d1fae5] leading-relaxed">{insight.recommendation}</p>
             </div>
           </div>
         );

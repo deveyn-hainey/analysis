@@ -213,6 +213,7 @@ function buildTeamAnalysis(
       fouls: countEventType(teamEvents, "foul"),
       corners: countEventType(teamEvents, "corner"),
       goals: countEventType(teamEvents, "goal"),
+      distanceCovered: 0,
     },
     heatmap: buildHeatmap(id, frames),
   };

@@ -10,6 +10,24 @@ import type {
   TeamId,
 } from "@/lib/types";
 
+function calcDistanceCovered(teamId: TeamId, frames: FrameData[]): number {
+  const PITCH_M_X = 105;
+  const PITCH_M_Y = 68;
+  let total = 0;
+  for (let i = 1; i < frames.length; i++) {
+    const prev = frames[i - 1];
+    const curr = frames[i];
+    for (const player of curr.players.filter((p) => p.team === teamId)) {
+      const prevPlayer = prev.players.find((p) => p.id === player.id);
+      if (!prevPlayer) continue;
+      const dx = ((player.position.x - prevPlayer.position.x) / 100) * PITCH_M_X;
+      const dy = ((player.position.y - prevPlayer.position.y) / 100) * PITCH_M_Y;
+      total += Math.sqrt(dx * dx + dy * dy);
+    }
+  }
+  return Math.round(total);
+}
+
 function buildHeatmap(teamId: TeamId, frames: FrameData[]): number[][] {
   const grid: number[][] = Array.from({ length: 10 }, () => Array(10).fill(0));
   for (const frame of frames) {
@@ -125,6 +143,7 @@ function buildTeamAnalysis(
       fouls: countEventType(teamEvents, "foul"),
       corners: countEventType(teamEvents, "corner"),
       goals: countEventType(teamEvents, "goal"),
+      distanceCovered: calcDistanceCovered(id, frames),
     },
     heatmap: buildHeatmap(id, frames),
   };
