@@ -2,7 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
 import type { FrameData, MatchEvent, Player, AnalyzeFrameRequest } from "@/lib/types";
 
-const FRAME_PROMPT = `You are a professional soccer video analysis system. Analyze this single match frame.
+const FRAME_PROMPT = `You are a professional soccer video analysis system analyzing broadcast TV footage.
+
+CONTEXT: Broadcast soccer is filmed from high wide angles. Players are SMALL figures on the pitch — don't expect close-ups. The ball is a small white/yellow dot. Jersey colors distinguish the two teams.
 
 Return ONLY valid JSON — no markdown, no code fences:
 {
@@ -13,39 +15,54 @@ Return ONLY valid JSON — no markdown, no code fences:
   "possession": "home",
   "possessingPlayerId": "h7",
   "events": [
-    { "type": "pass", "team": "home", "description": "...", "confidence": 0.85 }
+    { "type": "pass", "team": "home", "description": "precise plain-English description", "confidence": 0.85 }
   ]
 }
 
-── PLAYERS ──
-- x/y: 0–100 percent of field (0,0=top-left, 100,100=bottom-right)
-- team: one jersey colour = "home", other = "away". Be CONSISTENT across all players.
-- role: "gk" (near own goal), "def", "mid", "fwd"
-- action: "running"|"standing"|"passing"|"shooting"|"tackling"|"jumping"|"goalkeeping"|"dribbling"
-- possessingPlayerId: id of player with foot on or nearest to the ball
+── STEP 1: SCOREBOARD SCAN (do this before anything else) ──
+Scan every corner and edge of the image for score overlays, tickers, or graphics.
+Common broadcast placements: top-left, top-right, bottom strip.
+Look for: "1-0", "2-1", team abbreviations with numbers, half-time scores.
+If ANY score is visible:
+  - Emit a "goal" event per goal shown (not just the change — total goals scored)
+  - description: "Scoreboard reads [score]"
+  - confidence: 0.98
+  - team: whichever team has the higher score, or the team that just scored
 
-── GOAL DETECTION (check these IN ORDER, stop at first match) ──
-1. SCOREBOARD — scan every corner and edge of the image for a score overlay, ticker, or graphic.
-   If any score shows (e.g. "1-0", "2-1", "Home 2 Away 1"):
-   - Emit a "goal" event for EVERY goal shown (one per goal counted, not just the change)
-   - description: "Scoreboard: [home score]–[away score]"
-   - confidence: 0.98
-   - This is the most reliable signal. Prioritise it above everything else.
-2. BALL IN NET — ball visually inside or touching the goal netting.
-3. CELEBRATION — attacking players with arms raised, jumping, or embracing after an attack.
-4. DEJECTED KEEPER — goalkeeper on ground or retrieving ball from net.
-If ANY of the above: emit a "goal" event with the team you believe scored.
+── STEP 2: GOAL VISUAL CUES ──
+Even without a scoreboard, report "goal" if you see:
+- Ball inside or touching the net/goal frame
+- Multiple attacking players celebrating (arms up, jumping, running together)
+- Goalkeeper on ground looking dejected or retrieving ball from net
+- Players mobbing one player in a huddle near the goal
 
-── OTHER EVENTS ──
-- Foot near/touching ball in kicking motion → "pass" (or "shot" if aimed at goal)
-- Two players contesting the same ball → "tackle"
-- Ball near corner flag → "corner"
-- Players forming a wall or referee with whistle → "freekick"
+── STEP 3: MOTION CONTEXT (if a previous frame was provided) ──
+Compare positions between the two frames to detect:
+- A player who was winding up → now shot/pass has occurred
+- Ball trajectory change → tackle or interception
+- Players converging → set piece or challenge
+- Player sprinting toward goal and now missing from the area → possible shot
+
+── STEP 4: OTHER EVENTS ──
+- Player foot contacting ball toward teammate → "pass"
+- Player foot contacting ball toward goal → "shot"
+- Two players both reaching for same ball → "tackle"
+- Ball at corner flag → "corner"
+- Players in a wall, referee visible, or arm gesture → "freekick"
 - Goalkeeper diving/catching → "save"
-- If player action is "passing", "shooting", or "tackling" you MUST include a matching event.
+- Player on ground after contact → "foul"
+RULE: If you assign "passing", "shooting", or "tackling" as a player action, you MUST include the matching event.
+
+── PLAYERS ──
+- Identify ALL visible players. Broadcast frames typically show 10–22 players.
+- x/y: 0–100 percent of field width/height (0,0 = top-left, 100,100 = bottom-right)
+- team: assign one jersey colour as "home", the other "away". BE CONSISTENT across both frames.
+- role: "gk" (nearest own goal line), "def", "mid", "fwd"
+- action: "running"|"standing"|"passing"|"shooting"|"tackling"|"jumping"|"goalkeeping"|"dribbling"
+- possessingPlayerId: id of the player whose foot is touching or nearest to the ball
 
 ── PASS COUNTING ──
-One pass = ball clearly leaving a player's foot toward a teammate. Never double-count.`;
+One pass = ball visibly leaving a player's foot toward a teammate. Never double-count the same pass.`;
 
 
 interface RawFrameEvent {
@@ -74,25 +91,40 @@ export async function POST(req: NextRequest) {
     }
 
     const body = (await req.json()) as AnalyzeFrameRequest;
-    const { base64, timestamp, frameIndex } = body;
+    const { base64, timestamp, frameIndex, prevBase64, prevTimestamp } = body;
 
     const client = new Anthropic({ apiKey });
 
+    // Build message content — include previous frame first when available so the
+    // model can reason about motion and continuity between the two frames.
+    type ImageBlock = { type: "image"; source: { type: "base64"; media_type: "image/jpeg"; data: string } };
+    type TextBlock = { type: "text"; text: string };
+    const content: Array<ImageBlock | TextBlock> = [];
+
+    if (prevBase64) {
+      content.push({
+        type: "image",
+        source: { type: "base64", media_type: "image/jpeg", data: prevBase64 },
+      });
+      content.push({
+        type: "text",
+        text: `PREVIOUS FRAME (${prevTimestamp?.toFixed(1)}s) — for motion context only, do NOT report events from this frame:`,
+      });
+    }
+
+    content.push({
+      type: "image",
+      source: { type: "base64", media_type: "image/jpeg", data: base64 },
+    });
+    content.push({
+      type: "text",
+      text: `CURRENT FRAME (${timestamp.toFixed(1)}s) — analyse this frame and report your JSON:\n\n${FRAME_PROMPT}`,
+    });
+
     const response = await client.messages.create({
       model: "claude-sonnet-4-6",
-      max_tokens: 1200,
-      messages: [
-        {
-          role: "user",
-          content: [
-            {
-              type: "image",
-              source: { type: "base64", media_type: "image/jpeg", data: base64 },
-            },
-            { type: "text", text: FRAME_PROMPT },
-          ],
-        },
-      ],
+      max_tokens: 1500,
+      messages: [{ role: "user", content }],
     });
 
     const raw = response.content[0].type === "text" ? response.content[0].text.trim() : "{}";

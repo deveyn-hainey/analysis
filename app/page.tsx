@@ -20,7 +20,7 @@ import { videoStore } from "@/lib/videoStore";
 const ACCEPTED_TYPES = ["video/mp4", "video/webm", "video/ogg", "video/quicktime"];
 
 function frameInterval(durationSeconds: number): number {
-  return Math.max(2, Math.min(10, Math.round(durationSeconds / 12)));
+  return Math.max(2, Math.min(8, Math.round(durationSeconds / 16)));
 }
 
 function extractFrames(
@@ -109,10 +109,13 @@ export default function HomePage() {
         let completed = 0;
         const analyzedFrames = await Promise.all(
           rawFrames.map(async (rawFrame, i) => {
+            const prev = i > 0 ? rawFrames[i - 1] : undefined;
             const payload: AnalyzeFrameRequest = {
               base64: rawFrame.base64,
               timestamp: rawFrame.timestamp,
               frameIndex: i,
+              prevBase64: prev?.base64,
+              prevTimestamp: prev?.timestamp,
             };
             try {
               const res = await fetch("/api/analyze/frame", {
