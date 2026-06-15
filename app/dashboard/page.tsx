@@ -29,7 +29,7 @@ function formatDuration(s: number) {
   return `${m}:${sec.toString().padStart(2, "0")}`;
 }
 
-type ViewMode = "coach" | "analyst";
+type ViewMode = "coach" | "player";
 
 function DashboardContent() {
   const router = useRouter();
@@ -117,7 +117,7 @@ function DashboardContent() {
           </div>
 
           <div className="flex items-center gap-3">
-            {/* Coach / Analyst toggle */}
+            {/* Coach / Player toggle */}
             <div className="flex rounded-lg border border-[#1c3020] overflow-hidden text-xs">
               <button
                 onClick={() => setViewMode("coach")}
@@ -130,14 +130,14 @@ function DashboardContent() {
                 Coach
               </button>
               <button
-                onClick={() => setViewMode("analyst")}
+                onClick={() => setViewMode("player")}
                 className={`px-3 py-1.5 font-medium transition-colors ${
-                  viewMode === "analyst"
+                  viewMode === "player"
                     ? "bg-green-400 text-black"
                     : "text-[#6b9e6b] hover:text-[#f0fdf4]"
                 }`}
               >
-                Analyst
+                Player
               </button>
             </div>
 
@@ -152,7 +152,7 @@ function DashboardContent() {
               </span>
             )}
 
-            {viewMode === "analyst" && (
+            {viewMode === "coach" && (
               <button
                 onClick={exportJson}
                 className="flex items-center gap-1.5 text-xs text-[#6b9e6b] hover:text-[#f0fdf4] border border-[#1c3020] hover:border-[#2d4a30] transition-colors px-3 py-1.5 rounded-lg"
@@ -211,8 +211,8 @@ function DashboardContent() {
           </div>
         </div>
 
-        {/* ── COACH MODE ── */}
-        {viewMode === "coach" && (
+        {/* ── PLAYER MODE ── */}
+        {viewMode === "player" && (
           <>
             {/* Insights first and prominent */}
             <div className="card p-6">
@@ -317,8 +317,8 @@ function DashboardContent() {
           </>
         )}
 
-        {/* ── ANALYST MODE ── */}
-        {viewMode === "analyst" && (
+        {/* ── COACH MODE ── */}
+        {viewMode === "coach" && (
           <>
             {/* KPI row */}
             <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
