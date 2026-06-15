@@ -2,9 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
 import type { FrameData, MatchEvent, Player, AnalyzeFrameRequest } from "@/lib/types";
 
-const FRAME_PROMPT = `You are a professional soccer video analysis system. Analyze this single frame from a match.
+const FRAME_PROMPT = `You are a professional soccer video analysis system. Analyze this single match frame.
 
-Return ONLY valid JSON — no markdown, no code fences, no explanation:
+Return ONLY valid JSON — no markdown, no code fences:
 {
   "players": [
     { "id": "h1", "number": 7, "team": "home", "role": "fwd", "position": { "x": 65, "y": 30 }, "action": "running" }
@@ -18,36 +18,35 @@ Return ONLY valid JSON — no markdown, no code fences, no explanation:
 }
 
 ── PLAYERS ──
-- position x/y: 0–100 percent of field (0,0 = top-left, 100,100 = bottom-right)
-- team: pick one jersey colour as "home", the other as "away". Be CONSISTENT for every player.
+- x/y: 0–100 percent of field (0,0=top-left, 100,100=bottom-right)
+- team: one jersey colour = "home", other = "away". Be CONSISTENT across all players.
 - role: "gk" (near own goal), "def", "mid", "fwd"
-- action: "running" | "standing" | "passing" | "shooting" | "tackling" | "jumping" | "goalkeeping" | "dribbling"
-- possessingPlayerId: id of the player whose foot is touching or closest to the ball
+- action: "running"|"standing"|"passing"|"shooting"|"tackling"|"jumping"|"goalkeeping"|"dribbling"
+- possessingPlayerId: id of player with foot on or nearest to the ball
 
-── EVENTS — be GENEROUS, report everything you can infer ──
-- Any foot near/touching ball in a kicking motion → "pass" (or "shot" if toward goal)
-- Two players both reaching for the same ball → "tackle"
+── GOAL DETECTION (check these IN ORDER, stop at first match) ──
+1. SCOREBOARD — scan every corner and edge of the image for a score overlay, ticker, or graphic.
+   If any score shows (e.g. "1-0", "2-1", "Home 2 Away 1"):
+   - Emit a "goal" event for EVERY goal shown (one per goal counted, not just the change)
+   - description: "Scoreboard: [home score]–[away score]"
+   - confidence: 0.98
+   - This is the most reliable signal. Prioritise it above everything else.
+2. BALL IN NET — ball visually inside or touching the goal netting.
+3. CELEBRATION — attacking players with arms raised, jumping, or embracing after an attack.
+4. DEJECTED KEEPER — goalkeeper on ground or retrieving ball from net.
+If ANY of the above: emit a "goal" event with the team you believe scored.
+
+── OTHER EVENTS ──
+- Foot near/touching ball in kicking motion → "pass" (or "shot" if aimed at goal)
+- Two players contesting the same ball → "tackle"
 - Ball near corner flag → "corner"
-- Players forming a wall or referee visible with whistle → "freekick"
-- Player diving/diving save → "save"
-- If you set a player's action to "passing", "shooting", or "tackling" you MUST include a matching event.
-
-── SCOREBOARD (highest priority for scoring) ──
-If ANY score overlay, graphic, or scoreboard is visible anywhere in the frame:
-- Read the exact score (e.g. "1-0", "2-1")
-- Add a "goal" event for the team that is leading or that has more goals than 0-0
-- Set description to: "Scoreboard shows [score] — [team] goal detected"
-- This is the most reliable signal — always check for it first.
-
-── GOAL DETECTION — also check these ──
-Report a "goal" event if ANY of the following are visible (even if you missed the crossing moment):
-1. Ball is visually inside or touching the net/goal frame
-2. Attacking players celebrating — arms raised, jumping, embracing teammates
-3. Goalkeeper on the ground, dejected, or retrieving ball from net
-4. Players clustered around the goal in a post-goal huddle
+- Players forming a wall or referee with whistle → "freekick"
+- Goalkeeper diving/catching → "save"
+- If player action is "passing", "shooting", or "tackling" you MUST include a matching event.
 
 ── PASS COUNTING ──
-A pass is a deliberate ball transfer to a teammate. If the ball has clearly left a player's foot toward a teammate, that is one pass. Do not count the same pass multiple times.`;
+One pass = ball clearly leaving a player's foot toward a teammate. Never double-count.`;
+
 
 interface RawFrameEvent {
   type: string;
@@ -80,7 +79,7 @@ export async function POST(req: NextRequest) {
     const client = new Anthropic({ apiKey });
 
     const response = await client.messages.create({
-      model: "claude-sonnet-4-6",
+      model: "claude-haiku-4-5-20251001",
       max_tokens: 1200,
       messages: [
         {
