@@ -326,7 +326,7 @@ export async function POST(req: NextRequest) {
       homeTeam,
       awayTeam,
       frames,
-      keyEvents: allEvents.filter((e) => e.isKeyMoment),
+      keyEvents: allEvents,
       insights,
       score: {
         home: countEventType(allEvents, "goal", "home"),

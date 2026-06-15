@@ -120,6 +120,8 @@ export interface AnalyzeFrameRequest {
   base64: string;
   timestamp: number;
   frameIndex: number;
+  prevBase64?: string;    // previous frame for motion context
+  prevTimestamp?: number;
 }
 
 // Payload for final summarize step
