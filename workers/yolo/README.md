@@ -47,6 +47,23 @@ YOLO_MODEL_PATH=/path/to/soccer-best.pt uvicorn app:app --host 0.0.0.0 --port 80
 
 This worker is intentionally a starter path: it improves speed and gives the app a real CV layer, but production-quality soccer analytics still needs a soccer-trained detector, tracking, and pitch calibration.
 
+## Use a pretrained football model from Hugging Face
+
+For the interview demo, start here instead of training from scratch:
+
+```bash
+YOLO_BACKEND=yolov5 \
+YOLO_MODEL_PATH=keremberke/yolov5m-football \
+YOLO_PLAYER_CLASSES=player \
+YOLO_BALL_CLASSES=ball \
+YOLO_REFEREE_CLASSES=referee \
+uvicorn app:app --host 0.0.0.0 --port 8001
+```
+
+That model is hosted on Hugging Face and loads through the `yolov5` package. It was trained on `keremberke/football-object-detection` and is intended for football object detection. The first run downloads the weights locally.
+
+If the class names differ after testing, adjust the `YOLO_PLAYER_CLASSES`, `YOLO_BALL_CLASSES`, and `YOLO_REFEREE_CLASSES` environment variables.
+
 ## Fine-tune a soccer detector
 
 Training requires labeled images in YOLO format. For a demo, label a small set of representative frames from the exact kind of match footage you will present:

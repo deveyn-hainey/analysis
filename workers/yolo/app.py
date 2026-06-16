@@ -13,6 +13,7 @@ from ultralytics import YOLO
 
 
 MODEL_PATH = os.getenv("YOLO_MODEL_PATH", "yolo11n.pt")
+MODEL_BACKEND = os.getenv("YOLO_BACKEND", "auto").lower()
 CONFIDENCE = float(os.getenv("YOLO_CONFIDENCE", "0.25"))
 PLAYER_CLASSES = {name.strip().lower() for name in os.getenv("YOLO_PLAYER_CLASSES", "person,player,goalkeeper").split(",")}
 BALL_CLASSES = {name.strip().lower() for name in os.getenv("YOLO_BALL_CLASSES", "sports ball,ball").split(",")}
@@ -27,7 +28,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-model = YOLO(MODEL_PATH)
+def use_huggingface_yolov5() -> bool:
+    if MODEL_BACKEND == "yolov5":
+        return True
+    if MODEL_BACKEND == "ultralytics":
+        return False
+    return "/" in MODEL_PATH and not MODEL_PATH.endswith(".pt")
+
+
+if use_huggingface_yolov5():
+    import yolov5
+
+    model = yolov5.load(MODEL_PATH)
+    model.conf = CONFIDENCE
+else:
+    model = YOLO(MODEL_PATH)
 
 
 class RawFrame(BaseModel):
@@ -107,6 +122,22 @@ def player_role(position: dict[str, float], team: TeamId) -> str:
 
 
 def detections_for_image(image: Image.Image) -> list[Detection]:
+    if use_huggingface_yolov5():
+        result = model(image, size=960)
+        names = result.names
+        detections: list[Detection] = []
+        for prediction in result.pred[0]:
+            x1, y1, x2, y2, confidence, cls_id = prediction.tolist()
+            cls_name = str(names[int(cls_id)]).lower()
+            detections.append(
+                Detection(
+                    cls_name=cls_name,
+                    confidence=float(confidence),
+                    xyxy=(float(x1), float(y1), float(x2), float(y2)),
+                )
+            )
+        return detections
+
     result = model.predict(source=np.asarray(image), conf=CONFIDENCE, verbose=False)[0]
     names = result.names
     detections: list[Detection] = []

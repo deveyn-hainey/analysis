@@ -63,6 +63,13 @@ numpy
 
 Start with YOLO object detection and tracking before trying a larger soccer action model.
 
+Recommended interview-demo model:
+
+- `keremberke/yolov5m-football` from Hugging Face
+- no extra paid API
+- downloads locally on first run
+- good first demo option for tactical-view football/soccer footage
+
 Recommended first version:
 
 - YOLO detector trained/fine-tuned for `player`, `goalkeeper`, `referee`, `ball`
