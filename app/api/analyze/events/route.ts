@@ -5,6 +5,9 @@ import type { AnalyzeEventsRequest, FrameData, MatchEvent, TeamId } from "@/lib/
 const EVENT_MODEL = process.env.ANTHROPIC_EVENT_MODEL ?? process.env.ANTHROPIC_SUMMARY_MODEL ?? "claude-sonnet-4-6";
 const EVENT_REVIEW_BATCH_SIZE = 8;
 const EVENT_REVIEW_MAX_ATTEMPTS = 2;
+const MAX_CANDIDATE_WINDOWS = 28;
+const DRIBBLE_DISTANCE_THRESHOLD = 6;
+const PASS_DISTANCE_THRESHOLD = 16;
 
 interface RawEvent {
   frameIndex: number;
@@ -91,7 +94,15 @@ function normalizeEventType(type: string): MatchEvent["type"] | null {
 }
 
 function mergeReviewedFrames(frames: FrameData[], review: RawEventReview): FrameData[] {
-  const updates = new Map((review.frames ?? []).map((frame) => [frame.frameIndex, frame]));
+  const updates = new Map<number, RawFrameUpdate>();
+  for (const frameUpdate of review.frames ?? []) {
+    const existing = updates.get(frameUpdate.frameIndex);
+    updates.set(frameUpdate.frameIndex, {
+      frameIndex: frameUpdate.frameIndex,
+      possession: frameUpdate.possession ?? existing?.possession,
+      events: [...(existing?.events ?? []), ...(frameUpdate.events ?? [])],
+    });
+  }
   const frameTimestamps = frames.map((frame) => frame.timestamp);
 
   return frames.map((frame) => {
@@ -157,8 +168,8 @@ function synthesizeMovementEvents(frames: FrameData[]): FrameData[] {
         frame.possession !== "contested" &&
         prev.possession !== frame.possession;
 
-      if (sameTeamPossession && distance >= 10) {
-        const type: MatchEvent["type"] = distance >= 22 ? "pass" : "dribble";
+      if (sameTeamPossession && distance >= DRIBBLE_DISTANCE_THRESHOLD) {
+        const type: MatchEvent["type"] = distance >= PASS_DISTANCE_THRESHOLD ? "pass" : "dribble";
         const team = frame.possession as TeamId;
         const event: MatchEvent = {
           id: `f${frame.frameIndex}-synth-${type}`,
@@ -243,6 +254,9 @@ function candidateWindows(frames: FrameData[]) {
       const inGoalZone = ball.x <= 8 || ball.x >= 92;
       const inShotZone = ball.x <= 22 || ball.x >= 78;
       const nearCorner = (ball.x <= 10 || ball.x >= 90) && (ball.y <= 12 || ball.y >= 88);
+      const nearestOpponent = nearest.find((player) =>
+        nearest[0] && player.team !== nearest[0].team
+      );
 
       if (inGoalZone) {
         candidates.push({
@@ -304,6 +318,35 @@ function candidateWindows(frames: FrameData[]) {
             },
           });
         }
+      }
+
+      if (prev?.ballPosition && frame.possession !== "contested") {
+        const distance = Math.hypot(ball.x - prev.ballPosition.x, ball.y - prev.ballPosition.y);
+        if (distance >= DRIBBLE_DISTANCE_THRESHOLD) {
+          candidates.push({
+            candidate_type: distance >= PASS_DISTANCE_THRESHOLD ? "possible_pass" : "possible_dribble",
+            frameIndex: frame.frameIndex,
+            window,
+            signals: {
+              ball_progression_distance: +distance.toFixed(1),
+              possession_team: frame.possession,
+              nearest_players: nearest,
+            },
+          });
+        }
+      }
+
+      if (nearest[0] && nearestOpponent && nearest[0].distance <= 12 && nearestOpponent.distance <= 14) {
+        candidates.push({
+          candidate_type: "possible_pressure_or_challenge",
+          frameIndex: frame.frameIndex,
+          window,
+          signals: {
+            nearest_ball_player: nearest[0],
+            nearest_opponent: nearestOpponent,
+            possession_team: frame.possession,
+          },
+        });
       }
     }
 
@@ -367,7 +410,7 @@ function candidateWindows(frames: FrameData[]) {
     }
   }
 
-  return candidates.slice(0, 12);
+  return candidates.slice(0, MAX_CANDIDATE_WINDOWS);
 }
 
 type CandidateWindow = ReturnType<typeof candidateWindows>[number];
@@ -421,6 +464,37 @@ function fallbackEventForCandidate(
       position: frame.ballPosition,
       evidence_used: ["YOLO placed the ball near the byline/corner area", "Claude event review was unavailable for this window"],
       conflicts: ["could be corner, goal kick, or open play"],
+      pipeline_flag: "low_confidence",
+    };
+  }
+
+  if (candidate.candidate_type === "possible_pass" || candidate.candidate_type === "possible_dribble") {
+    const type = candidate.candidate_type === "possible_pass" ? "pass" : "dribble";
+    return {
+      frameIndex: frame.frameIndex,
+      timestamp: frame.timestamp,
+      type,
+      team,
+      description: `Unverified ${type} candidate from YOLO ball progression`,
+      confidence: type === "pass" ? 0.42 : 0.4,
+      position: frame.ballPosition,
+      evidence_used: ["YOLO tracked ball progression while one team retained possession", "Claude event review may not have confirmed this window"],
+      conflicts: ["tracking-derived event"],
+      pipeline_flag: "low_confidence",
+    };
+  }
+
+  if (candidate.candidate_type === "possible_pressure_or_challenge") {
+    return {
+      frameIndex: frame.frameIndex,
+      timestamp: frame.timestamp,
+      type: "tackle",
+      team,
+      description: "Unverified pressure/challenge candidate from players converging near the ball",
+      confidence: 0.36,
+      position: frame.ballPosition,
+      evidence_used: ["YOLO detected nearby opponents around the ball", "Claude event review may not have confirmed this window"],
+      conflicts: ["could be pressure, tackle attempt, or normal marking"],
       pipeline_flag: "low_confidence",
     };
   }
@@ -479,7 +553,7 @@ function buildReviewContent(
     {
       type: "text",
       text: `You are a soccer match analysis verifier for fixed wide-angle tactical camera footage.
-You operate as a SPARSE VERIFIER and SEMANTIC LABELER only.
+You operate as an EVENT-RICH SOCCER TIMELINE REVIEWER.
 
 Upstream already ran:
 - YOLO football detection for players and ball
@@ -490,11 +564,12 @@ Upstream already ran:
 Your job:
 - Verify candidate windows using the images and YOLO metadata.
 - Correct possession only when the visual evidence is clearer than YOLO's nearest-player estimate.
-- Label sparse high-value events for the timeline.
-- Do NOT enumerate dense events from scratch.
-- Low confidence beats a wrong confident answer.
+- Build a useful event timeline, not only rare highlights.
+- Report meaningful passes, dribbles/carries, pressure/challenges, turnovers, shots, saves, restarts, and goals when visible or strongly implied.
+- Use lower confidence for tracking-implied routine events instead of omitting them.
+- Low confidence beats a blank timeline.
 - If YOLO missed the ball, use the frame image to set possession when one team is clearly in controlled possession.
-- If no major event is visible, still return possession corrections for frames where possession is clear.
+- If no major event is visible, still return possession corrections and routine ball-progression events where the metadata and image support them.
 
 Return ONLY valid JSON:
 {
@@ -526,9 +601,18 @@ Rules:
 - Allowed event types: goal, shot, shot_saved, shot_off_target, corner, goal_kick, card_yellow, card_red, card_unknown, foul, freekick, offside, pass, tackle, throw-in, dribble.
 - Every event MUST include a numeric timestamp copied from one of the supplied frame timestamps. Do not infer time from frame order alone.
 - Only report events visible or strongly implied inside candidate windows.
-- Do not create an event for every frame.
-- If no candidate is convincing, return an empty events array for that frame.
+- Aim for a useful timeline: 1–3 events per active candidate window is acceptable when play is moving.
+- Do not create duplicate events for the same action across adjacent frames.
+- If no candidate is convincing, return an empty events array for that frame, but do not be overly conservative for routine passes/dribbles.
 - Pass/dribble/tackle events may be lower confidence when inferred from YOLO ball movement plus visible player context.
+
+Routine event rules:
+- pass: ball moves meaningfully between teammates or advances quickly while the same team keeps possession.
+- dribble: ball carrier advances or carries under control while possession stays with the same team.
+- tackle: opponent pressure/challenge, ball contest, or possession regain; use "tackle" for pressure/regain even when exact contact is uncertain.
+- shot: ball is directed toward goal, enters the box/goal channel, forces goalkeeper reaction, or has a visible shooting body shape.
+- save: goalkeeper block/catch/parry or shot stopped near goal.
+- corner/goal_kick/throw-in: ball near boundary with restart shape; use lower confidence when uncertain.
 
 Goal rules:
 - Do NOT confirm a goal from one weak signal.
@@ -649,7 +733,18 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    const reviewedFrames = mergeReviewedFrames(frames, { frames: reviewedUpdates });
+    const framesWithReviewedEvents = new Set(
+      reviewedUpdates
+        .filter((update) => (update.events?.length ?? 0) > 0)
+        .map((update) => update.frameIndex)
+    );
+    const fallbackUpdates = fallbackUpdatesForFrames(
+      frames,
+      candidates.filter((candidate) => !framesWithReviewedEvents.has(candidate.frameIndex))
+    );
+    const reviewedFrames = mergeReviewedFrames(frames, {
+      frames: [...fallbackUpdates, ...reviewedUpdates],
+    });
     return NextResponse.json({
       frames: synthesizeMovementEvents(reviewedFrames),
       warnings: reviewWarnings,
