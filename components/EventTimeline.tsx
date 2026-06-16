@@ -28,7 +28,11 @@ const EVENT_CONFIG: Record<string, { icon: React.ElementType; color: string; bgC
   tackle: { icon: Shield, color: "text-violet-400", bgColor: "bg-violet-400/10" },
   foul: { icon: AlertCircle, color: "text-red-400", bgColor: "bg-red-400/10" },
   corner: { icon: CornerDownRight, color: "text-cyan-400", bgColor: "bg-cyan-400/10" },
+  "goal-kick": { icon: Flag, color: "text-cyan-300", bgColor: "bg-cyan-300/10" },
   freekick: { icon: Wind, color: "text-green-400", bgColor: "bg-green-400/10" },
+  card_yellow: { icon: AlertCircle, color: "text-yellow-400", bgColor: "bg-yellow-400/10" },
+  card_red: { icon: AlertCircle, color: "text-red-500", bgColor: "bg-red-500/10" },
+  card_unknown: { icon: AlertCircle, color: "text-amber-300", bgColor: "bg-amber-300/10" },
   pass: { icon: ArrowUpRight, color: "text-[#6b9e6b]", bgColor: "bg-[#142014]" },
   offside: { icon: Flag, color: "text-amber-400", bgColor: "bg-amber-400/10" },
   dribble: { icon: ArrowUpRight, color: "text-purple-400", bgColor: "bg-purple-400/10" },
@@ -110,6 +114,14 @@ export default function EventTimeline({
                 )}
               </div>
               <p className="text-xs text-[#6b9e6b] leading-relaxed">{event.description}</p>
+              {event.semanticLabel && (
+                <p className="text-xs text-green-400/80 mt-1">{event.semanticLabel.replaceAll("_", " ")}</p>
+              )}
+              {event.evidenceUsed && event.evidenceUsed.length > 0 && (
+                <p className="text-xs text-[#6b9e6b]/70 mt-1">
+                  Evidence: {event.evidenceUsed.slice(0, 2).join("; ")}
+                </p>
+              )}
             </div>
 
             <div className="flex-shrink-0 text-right">

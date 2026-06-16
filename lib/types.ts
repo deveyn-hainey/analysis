@@ -17,8 +17,12 @@ export type EventType =
   | "goal"
   | "save"
   | "corner"
+  | "goal-kick"
   | "freekick"
   | "foul"
+  | "card_yellow"
+  | "card_red"
+  | "card_unknown"
   | "offside"
   | "throw-in"
   | "dribble";
@@ -49,6 +53,9 @@ export interface MatchEvent {
   description: string;
   confidence: number;
   isKeyMoment: boolean;
+  semanticLabel?: string;
+  evidenceUsed?: string[];
+  conflicts?: string[];
 }
 
 export interface FrameData {
