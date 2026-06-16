@@ -100,6 +100,76 @@ function mergeReviewedFrames(frames: FrameData[], review: RawEventReview): Frame
   });
 }
 
+function eventKey(event: MatchEvent) {
+  return `${Math.round(event.timestamp)}-${event.team ?? "none"}-${event.type}`;
+}
+
+function synthesizeMovementEvents(frames: FrameData[]): FrameData[] {
+  const existing = new Set(frames.flatMap((f) => f.events.map(eventKey)));
+
+  return frames.map((frame, i) => {
+    const prev = frames[i - 1];
+    const additions: MatchEvent[] = [];
+
+    if (prev && prev.ballPosition && frame.ballPosition) {
+      const distance = Math.hypot(
+        frame.ballPosition.x - prev.ballPosition.x,
+        frame.ballPosition.y - prev.ballPosition.y
+      );
+      const sameTeamPossession =
+        frame.possession !== "contested" &&
+        prev.possession === frame.possession;
+      const possessionTurnover =
+        prev.possession !== "contested" &&
+        frame.possession !== "contested" &&
+        prev.possession !== frame.possession;
+
+      if (sameTeamPossession && distance >= 10) {
+        const type: MatchEvent["type"] = distance >= 22 ? "pass" : "dribble";
+        const team = frame.possession as TeamId;
+        const event: MatchEvent = {
+          id: `f${frame.frameIndex}-synth-${type}`,
+          timestamp: frame.timestamp,
+          type,
+          team,
+          description:
+            type === "pass"
+              ? `${team === "home" ? "Home" : "Away"} ball progression detected from YOLO ball movement`
+              : `${team === "home" ? "Home" : "Away"} controlled carry detected from YOLO ball movement`,
+          confidence: 0.45,
+          isKeyMoment: false,
+          position: frame.ballPosition,
+          evidenceUsed: [`ball moved ${distance.toFixed(1)} pitch units while possession stayed ${frame.possession}`],
+          conflicts: ["synthetic event from tracking, not visually verified by Claude"],
+        };
+        if (!existing.has(eventKey(event))) additions.push(event);
+      }
+
+      if (possessionTurnover) {
+        const team = frame.possession as TeamId;
+        const event: MatchEvent = {
+          id: `f${frame.frameIndex}-synth-turnover`,
+          timestamp: frame.timestamp,
+          type: "tackle",
+          team,
+          description: `${team === "home" ? "Home" : "Away"} regain detected from possession change`,
+          confidence: 0.42,
+          isKeyMoment: false,
+          position: frame.ballPosition,
+          semanticLabel: "high_press_turnover",
+          evidenceUsed: [`possession changed from ${prev.possession} to ${frame.possession}`],
+          conflicts: ["classified as tackle/turnover from tracking signal"],
+        };
+        if (!existing.has(eventKey(event))) additions.push(event);
+      }
+    }
+
+    return additions.length
+      ? { ...frame, events: [...frame.events, ...additions] }
+      : frame;
+  });
+}
+
 function nearestPlayers(frame: FrameData, count = 4) {
   if (!frame.ballPosition) return [];
   return frame.players
@@ -191,6 +261,20 @@ function candidateWindows(frames: FrameData[]) {
         },
       });
     }
+
+    if (!ball && frame.players.length > 0) {
+      candidates.push({
+        candidate_type: "possible_open_play_ball_not_detected",
+        frameIndex: frame.frameIndex,
+        window,
+        signals: {
+          ball_detected: false,
+          yolo_player_count: frame.players.length,
+          yolo_possession_estimate: frame.possession,
+          instruction: "Use the image to correct possession and label only obvious high-value events.",
+        },
+      });
+    }
   }
 
   return candidates.slice(0, 12);
@@ -241,6 +325,8 @@ Your job:
 - Label sparse high-value events for the timeline.
 - Do NOT enumerate dense events from scratch.
 - Low confidence beats a wrong confident answer.
+- If YOLO missed the ball, use the frame image to set possession when one team is clearly in controlled possession.
+- If no major event is visible, still return possession corrections for frames where possession is clear.
 
 Return ONLY valid JSON:
 {
@@ -271,6 +357,7 @@ Rules:
 - Only report events visible or strongly implied inside candidate windows.
 - Do not create an event for every frame.
 - If no candidate is convincing, return an empty events array for that frame.
+- Pass/dribble/tackle events may be lower confidence when inferred from YOLO ball movement plus visible player context.
 
 Goal rules:
 - Do NOT confirm a goal from one weak signal.
@@ -320,7 +407,8 @@ ${JSON.stringify(candidates)}`,
 
     const raw = response.content[0].type === "text" ? response.content[0].text : "{}";
     const parsed = JSON.parse(cleanJson(raw)) as RawEventReview;
-    return NextResponse.json({ frames: mergeReviewedFrames(frames, parsed) });
+    const reviewedFrames = mergeReviewedFrames(frames, parsed);
+    return NextResponse.json({ frames: synthesizeMovementEvents(reviewedFrames) });
   } catch (err) {
     console.error("[/api/analyze/events]", err);
     return NextResponse.json({ error: "Event review failed." }, { status: 500 });

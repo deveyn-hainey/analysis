@@ -82,8 +82,12 @@ function buildTeamAnalysis(
   // across frames are not stable enough to infer passes reliably.
   const passCount = countEventType(teamEvents, "pass");
   const shotCount = countEventType(teamEvents, "shot");
-  const possessionFrames = frames.filter((f) => f.possession === id).length;
-  const possession = Math.round((possessionFrames / Math.max(frames.length, 1)) * 100);
+  const possessionSampleFrames = frames.filter((f) => f.possession === "home" || f.possession === "away");
+  const possessionFrames = possessionSampleFrames.filter((f) => f.possession === id).length;
+  const possession =
+    possessionSampleFrames.length > 0
+      ? Math.round((possessionFrames / possessionSampleFrames.length) * 100)
+      : 50;
 
   const positions = frames.flatMap((f) =>
     f.players.filter((p) => p.team === id).map((p) => p.position)
