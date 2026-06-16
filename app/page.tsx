@@ -243,26 +243,11 @@ export default function HomePage() {
             analyzedFrames = await analyzeFramesWithWorker(rawFrames);
             setProgress(86);
             setStatusDetail(`YOLO worker analysed ${analyzedFrames.length} frames…`);
-          } catch {
-            setStatusDetail("YOLO worker unavailable; falling back to Claude frame analysis…");
-            const claudeResult = await analyzeFrames(
-              rawFrames,
-              (completed, failedFrames) => {
-                setProgress(36 + Math.round((completed / rawFrames.length) * 50));
-                setStatusDetail(
-                  failedFrames > 0
-                    ? `Analysed ${completed} of ${rawFrames.length} frames (${failedFrames} retried and skipped)…`
-                    : `Analysed ${completed} of ${rawFrames.length} frames…`
-                );
-              }
+          } catch (err) {
+            const detail = err instanceof Error ? err.message : "Unknown worker error";
+            throw new Error(
+              `YOLO worker failed at ${VISION_WORKER_URL}. Make sure the worker terminal is still running, then retry. Details: ${detail}`
             );
-
-            if (claudeResult.failed / rawFrames.length > MAX_FAILED_FRAME_RATIO) {
-              throw new Error(
-                `AI analysis failed for ${claudeResult.failed} of ${rawFrames.length} frames. Please try again with a shorter or clearer clip.`
-              );
-            }
-            analyzedFrames = claudeResult.frames;
           }
         } else {
           const claudeResult = await analyzeFrames(
