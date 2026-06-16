@@ -24,19 +24,21 @@ const MAX_FRAME_RETRIES = 1;
 const MAX_FAILED_FRAME_RATIO = 0.3;
 const SEND_PREVIOUS_FRAME_CONTEXT = false;
 const VISION_WORKER_URL = process.env.NEXT_PUBLIC_VISION_WORKER_URL?.replace(/\/$/, "");
-// Frames per /api/analyze/events request. Matches the server-side batch size so
-// each client request maps to exactly one Claude call on the server side.
-const EVENT_REVIEW_CLIENT_BATCH = 8;
-// Two concurrent event-review requests roughly halves wall-clock time vs sequential.
-const EVENT_REVIEW_CLIENT_CONCURRENCY = 2;
+// 4 frames per request keeps each Claude call under ~20s (vs 50-60s with 8 frames).
+// Smaller batches also mean smaller JSON responses so max_tokens can stay lower.
+const EVENT_REVIEW_CLIENT_BATCH = 4;
+// 4 concurrent requests: with 4-frame batches a 40-frame clip becomes 10 batches
+// → 3 rounds of 4 parallel calls → ~60s total vs ~175s with the old 8-frame/2-concurrent setup.
+const EVENT_REVIEW_CLIENT_CONCURRENCY = 4;
 
 type RawFrame = { base64: string; timestamp: number };
 
 function frameInterval(durationSeconds: number): number {
-  // Capped at 8s before, which could step right over an entire goal sequence
-  // (crossing the line + celebration + scoreboard update is often a 2-4s window)
-  // between two samples. Tighter cap trades more frames/cost for not missing it.
-  return Math.max(2, Math.min(4, Math.round(durationSeconds / 20)));
+  // 6s cap for longer clips: a 2:30 video → 25 frames (vs 38 at 4s cap).
+  // Fewer frames = fewer Claude batches = meaningfully faster total processing.
+  // Goal sequences (kick + net + celebration) span ~3-4s so a 6s interval will
+  // still catch either the action frame or the immediate celebration frame.
+  return Math.max(2, Math.min(6, Math.round(durationSeconds / 20)));
 }
 
 function extractFrames(
@@ -275,9 +277,9 @@ function preferScoreboardGoals(frames: FrameData[]): FrameData[] {
 // sending half-resolution images cuts Claude payload size by ~60%.
 function resizeFramesForReview(
   frames: RawFrame[],
-  width = 960,
-  height = 540,
-  quality = 0.78
+  width = 640,
+  height = 360,
+  quality = 0.75
 ): Promise<RawFrame[]> {
   // Each frame gets its own canvas — sharing one canvas across concurrent onload
   // callbacks causes them to overwrite each other mid-draw, producing corrupt images.

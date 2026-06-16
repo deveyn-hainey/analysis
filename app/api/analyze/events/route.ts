@@ -3,7 +3,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import type { AnalyzeEventsRequest, FrameData, MatchEvent, TeamId } from "@/lib/types";
 
 const EVENT_MODEL = process.env.ANTHROPIC_EVENT_MODEL ?? process.env.ANTHROPIC_SUMMARY_MODEL ?? "claude-sonnet-4-6";
-const EVENT_REVIEW_BATCH_SIZE = 8;
+const EVENT_REVIEW_BATCH_SIZE = 4;
 const EVENT_REVIEW_MAX_ATTEMPTS = 3;
 const MAX_CANDIDATE_WINDOWS = 40;
 const DRIBBLE_DISTANCE_THRESHOLD = 6;
@@ -35,7 +35,7 @@ interface RawEventReview {
 }
 
 type ImageBlock = { type: "image"; source: { type: "base64"; media_type: "image/jpeg"; data: string } };
-type TextBlock = { type: "text"; text: string };
+type TextBlock = { type: "text"; text: string; cache_control?: { type: "ephemeral" } };
 type ReviewContentBlock = ImageBlock | TextBlock;
 
 function cleanJson(text: string) {
@@ -828,9 +828,12 @@ Semantic labels after confirmation:
 - sustained_buildup
 - high_press_turnover
 - direct_play
-- null when unsupported
-
-YOLO metadata:
+- null when unsupported`,
+      cache_control: { type: "ephemeral" },
+    },
+    {
+      type: "text",
+      text: `YOLO metadata:
 ${JSON.stringify(compactFrames)}
 
 Candidate windows:
@@ -882,10 +885,10 @@ async function reviewFrameBatch(
     try {
       const response = await client.messages.create({
         model: EVENT_MODEL,
-        // Bumped from 3000: at ~3 chars/token, a batch with 8 frames and rich
-        // per-event fields (evidence_used/conflicts/etc) easily hits 3000 tokens,
-        // truncating the JSON and causing the parse error we log in the warning.
-        max_tokens: 5000,
+        // 4 frames per batch × ~3 events × ~80 tokens each ≈ 1000 tokens output.
+        // 2500 gives 2.5× headroom for busy passages without the 50-60s response
+        // times we saw at 5000 tokens with 8-frame batches.
+        max_tokens: 2500,
         messages: [{ role: "user", content: buildReviewContent(images, compactFrames, batchCandidates) }],
       });
 
