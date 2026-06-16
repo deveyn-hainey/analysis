@@ -4,6 +4,9 @@ import os
 from dataclasses import dataclass
 from typing import Any, Literal
 
+os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
+os.environ.setdefault("YOLO_CONFIG_DIR", "/tmp/Ultralytics")
+
 import numpy as np
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
