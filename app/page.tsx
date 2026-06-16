@@ -14,7 +14,7 @@ import {
   Cpu,
   BarChart3,
 } from "lucide-react";
-import type { AnalyzeFrameRequest, FrameData, MatchAnalysis } from "@/lib/types";
+import type { AnalyzeEventsRequest, AnalyzeFrameRequest, FrameData, MatchAnalysis } from "@/lib/types";
 import { videoStore } from "@/lib/videoStore";
 import { frameImageStore } from "@/lib/frameImageStore";
 
@@ -195,6 +195,31 @@ async function analyzeFramesWithWorker(rawFrames: RawFrame[]): Promise<FrameData
   return data.frames;
 }
 
+async function reviewEventsWithClaude(rawFrames: RawFrame[], frames: FrameData[]): Promise<FrameData[]> {
+  const payload: AnalyzeEventsRequest = {
+    images: rawFrames,
+    frames,
+  };
+
+  const res = await fetch("/api/analyze/events", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: "Event review failed" }));
+    throw new Error((err as { error?: string }).error ?? "Event review failed");
+  }
+
+  const data = (await res.json()) as { frames?: FrameData[] };
+  if (!data.frames || data.frames.length === 0) {
+    throw new Error("Event review returned no frames");
+  }
+
+  return data.frames;
+}
+
 export default function HomePage() {
   const router = useRouter();
   const [dragOver, setDragOver] = useState(false);
@@ -241,8 +266,11 @@ export default function HomePage() {
         if (VISION_WORKER_URL) {
           try {
             analyzedFrames = await analyzeFramesWithWorker(rawFrames);
+            setProgress(72);
+            setStatusDetail("Reviewing YOLO detections for match events…");
+            analyzedFrames = await reviewEventsWithClaude(rawFrames, analyzedFrames);
             setProgress(86);
-            setStatusDetail(`YOLO worker analysed ${analyzedFrames.length} frames…`);
+            setStatusDetail(`Reviewed ${analyzedFrames.length} frames for events…`);
           } catch (err) {
             const detail = err instanceof Error ? err.message : "Unknown worker error";
             throw new Error(

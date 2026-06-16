@@ -220,6 +220,68 @@ def analyze_single_frame(raw: RawFrame, frame_index: int) -> dict[str, Any]:
     return frame
 
 
+def analyze_precomputed_frame(
+    raw: RawFrame,
+    frame_index: int,
+    image: Image.Image,
+    detections: list[Detection],
+    teams: list[TeamId],
+) -> dict[str, Any]:
+    width, height = image.size
+    person_detections = [
+        d for d in detections
+        if d.cls_name in PLAYER_CLASSES and d.cls_name not in REFEREE_CLASSES
+    ]
+    ball_detections = [d for d in detections if d.cls_name in BALL_CLASSES]
+
+    players: list[dict[str, Any]] = []
+    team_counts: dict[TeamId, int] = {"home": 0, "away": 0}
+
+    for detection, team in zip(person_detections, teams):
+        team_counts[team] += 1
+        position = position_from_box(detection.xyxy, width, height)
+        players.append(
+            {
+                "id": f"{'h' if team == 'home' else 'a'}{team_counts[team]}",
+                "number": 0,
+                "team": team,
+                "role": player_role(position, team),
+                "position": position,
+                "action": "standing",
+            }
+        )
+
+    ball_position = None
+    if ball_detections:
+        best_ball = max(ball_detections, key=lambda d: d.confidence)
+        ball_position = position_from_box(best_ball.xyxy, width, height)
+
+    possession: TeamId | Literal["contested"] = "contested"
+    possessing_player = None
+    if ball_position and players:
+        nearest = min(
+            players,
+            key=lambda p: (p["position"]["x"] - ball_position["x"]) ** 2
+            + (p["position"]["y"] - ball_position["y"]) ** 2,
+        )
+        possession = nearest["team"]
+        possessing_player = {"team": nearest["team"], "playerId": nearest["id"]}
+
+    frame: dict[str, Any] = {
+        "frameIndex": frame_index,
+        "timestamp": raw.timestamp,
+        "players": players,
+        "ballPosition": ball_position,
+        "possession": possession,
+        "events": [],
+    }
+
+    if possessing_player:
+        frame["possessingPlayer"] = possessing_player
+
+    return frame
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok", "model": MODEL_PATH}
@@ -227,7 +289,28 @@ def health() -> dict[str, str]:
 
 @app.post("/analyze-frames")
 def analyze_frames(request: AnalyzeFramesRequest) -> dict[str, Any]:
-    frames = [analyze_single_frame(frame, i) for i, frame in enumerate(request.frames)]
+    decoded: list[tuple[RawFrame, Image.Image, list[Detection], list[Detection]]] = []
+    all_colors: list[np.ndarray] = []
+
+    for frame in request.frames:
+        image = decode_frame(frame.base64)
+        detections = detections_for_image(image)
+        person_detections = [
+            d for d in detections
+            if d.cls_name in PLAYER_CLASSES and d.cls_name not in REFEREE_CLASSES
+        ]
+        colors = [crop_mean_color(image, d.xyxy) for d in person_detections]
+        all_colors.extend(colors)
+        decoded.append((frame, image, detections, person_detections))
+
+    all_teams = split_teams(all_colors)
+    cursor = 0
+    frames = []
+    for i, (frame, image, detections, person_detections) in enumerate(decoded):
+        teams = all_teams[cursor:cursor + len(person_detections)]
+        cursor += len(person_detections)
+        frames.append(analyze_precomputed_frame(frame, i, image, detections, teams))
+
     return {
         "processingMethod": "yolo-worker",
         "frames": frames,

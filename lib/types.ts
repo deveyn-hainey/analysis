@@ -128,3 +128,8 @@ export interface AnalyzeFrameRequest {
 export interface SummarizeRequest {
   frames: FrameData[];
 }
+
+export interface AnalyzeEventsRequest {
+  frames: FrameData[];
+  images: Array<{ base64: string; timestamp: number }>;
+}
