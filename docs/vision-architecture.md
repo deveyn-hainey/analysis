@@ -107,6 +107,14 @@ Using the local YOLO worker:
 - First run may download YOLO weights.
 - Accuracy is limited until the generic model is replaced with soccer-trained weights.
 
+Fine-tuning locally:
+
+- No additional paid API is required.
+- Requires labeled soccer frames in YOLO format.
+- A small interview-demo dataset of 100-300 labeled frames can be enough to show the difference.
+- CPU training is free but can be slow; GPU or Apple Silicon acceleration is faster if available.
+- The trained weights are loaded with `YOLO_MODEL_PATH=/path/to/best.pt`.
+
 ## What To Set Up Next
 
 For a real accuracy upgrade, set up one of these:

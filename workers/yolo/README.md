@@ -46,3 +46,70 @@ YOLO_MODEL_PATH=/path/to/soccer-best.pt uvicorn app:app --host 0.0.0.0 --port 80
 ```
 
 This worker is intentionally a starter path: it improves speed and gives the app a real CV layer, but production-quality soccer analytics still needs a soccer-trained detector, tracking, and pitch calibration.
+
+## Fine-tune a soccer detector
+
+Training requires labeled images in YOLO format. For a demo, label a small set of representative frames from the exact kind of match footage you will present:
+
+- `player`
+- `goalkeeper`
+- `referee`
+- `ball`
+
+Recommended demo-size dataset:
+
+- 100-300 labeled frames can make the demo visibly better than generic YOLO.
+- Include wide tactical shots, close-ups, goalmouth moments, dark/light jerseys, and frames where the ball is small.
+- Put 80% of frames in train and 20% in validation.
+
+Dataset shape:
+
+```txt
+soccer-dataset/
+  images/
+    train/
+    val/
+  labels/
+    train/
+    val/
+  dataset.yaml
+```
+
+Use `dataset.example.yaml` as the starting point.
+
+Train locally:
+
+```bash
+python train.py \
+  --data /absolute/path/to/soccer-dataset/dataset.yaml \
+  --model yolo11n.pt \
+  --epochs 50 \
+  --imgsz 960 \
+  --batch 8
+```
+
+Run the worker with the trained weights:
+
+```bash
+YOLO_MODEL_PATH=runs/soccer/detector/weights/best.pt \
+uvicorn app:app --host 0.0.0.0 --port 8001
+```
+
+For an interview demo, this local training path has no API cost. Training on CPU may be slow; if you have Apple Silicon or a GPU-backed Python/PyTorch install, it should be much faster.
+
+## How YOLO and Claude work together
+
+YOLO runs first and produces structured frame data:
+
+- player locations
+- ball location when visible
+- rough team split from jersey colors
+- rough possession from nearest player to ball
+
+Claude runs after that to generate the coaching insights and can still be used as a fallback when the YOLO worker is not running.
+
+The demo story is:
+
+1. YOLO does the fast computer-vision extraction locally.
+2. Claude turns the extracted match data into a readable coaching report.
+3. The dashboard renders the resulting tactical overlay and event timeline.

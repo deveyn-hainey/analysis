@@ -14,6 +14,9 @@ from ultralytics import YOLO
 
 MODEL_PATH = os.getenv("YOLO_MODEL_PATH", "yolo11n.pt")
 CONFIDENCE = float(os.getenv("YOLO_CONFIDENCE", "0.25"))
+PLAYER_CLASSES = {name.strip().lower() for name in os.getenv("YOLO_PLAYER_CLASSES", "person,player,goalkeeper").split(",")}
+BALL_CLASSES = {name.strip().lower() for name in os.getenv("YOLO_BALL_CLASSES", "sports ball,ball").split(",")}
+REFEREE_CLASSES = {name.strip().lower() for name in os.getenv("YOLO_REFEREE_CLASSES", "referee").split(",")}
 
 app = FastAPI(title="SoccerVision YOLO Worker")
 app.add_middleware(
@@ -127,8 +130,11 @@ def analyze_single_frame(raw: RawFrame, frame_index: int) -> dict[str, Any]:
     width, height = image.size
     detections = detections_for_image(image)
 
-    person_detections = [d for d in detections if d.cls_name == "person"]
-    ball_detections = [d for d in detections if d.cls_name in {"sports ball", "ball"}]
+    person_detections = [
+        d for d in detections
+        if d.cls_name in PLAYER_CLASSES and d.cls_name not in REFEREE_CLASSES
+    ]
+    ball_detections = [d for d in detections if d.cls_name in BALL_CLASSES]
     colors = [crop_mean_color(image, d.xyxy) for d in person_detections]
     teams = split_teams(colors)
 
