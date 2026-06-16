@@ -55,14 +55,44 @@ For the interview demo, start here instead of training from scratch:
 YOLO_BACKEND=yolov5 \
 YOLO_MODEL_PATH=keremberke/yolov5m-football \
 YOLO_PLAYER_CLASSES=player \
-YOLO_BALL_CLASSES=ball \
-YOLO_REFEREE_CLASSES=referee \
+YOLO_BALL_CLASSES=football \
 uvicorn app:app --host 0.0.0.0 --port 8001
 ```
 
 That model is hosted on Hugging Face and loads through the `yolov5` package. It was trained on `keremberke/football-object-detection` and is intended for football object detection. The first run downloads the weights locally.
 
-If the class names differ after testing, adjust the `YOLO_PLAYER_CLASSES`, `YOLO_BALL_CLASSES`, and `YOLO_REFEREE_CLASSES` environment variables.
+This model only has two classes — `football` (the ball) and `player` (everyone on the pitch, including goalkeepers and referees). There is no separate `referee` class, so `YOLO_REFEREE_CLASSES` has nothing to match against and is left unset above; referees are not excluded from team-color clustering with this model.
+
+The worker logs a warning on startup if your configured `YOLO_PLAYER_CLASSES`/`YOLO_BALL_CLASSES` don't overlap with the model's actual class names at all — check that log line if ball or player detections seem to be silently missing. Confirm a model's real class names yourself with:
+
+```python
+import yolov5
+print(yolov5.load("keremberke/yolov5m-football").names)
+```
+
+## Use a pretrained soccer-specific YOLOv11n model (player/ball/referee)
+
+[Adit-jain/soccana](https://huggingface.co/Adit-jain/soccana) is a YOLOv11n model trained
+specifically on players, the ball, and referees (3 classes), rather than a generic
+COCO/football-vs-everything-else split. It's hosted on the HF Hub as a plain repo file,
+not via Ultralytics' own `ultralyticsplus`/`from_pretrained` packaging, so don't install
+`ultralyticsplus` for it — as of writing that package pins `ultralytics==8.0.239`, which
+predates YOLO11 support and will downgrade the `ultralytics` install this worker already
+depends on. Instead, point the worker at the repo + file path and let `huggingface_hub`
+resolve it to a local path before `ultralytics.YOLO()` loads it:
+
+```bash
+YOLO_MODEL_PATH=Adit-jain/soccana \
+YOLO_HF_FILENAME=Model/weights/best.pt \
+uvicorn app:app --host 0.0.0.0 --port 8001
+```
+
+This model's real classes are `Player`, `Ball`, `Referee` (verified by loading the
+checkpoint directly — the model card's casing differs slightly but matching here is
+case-insensitive). They line up with this worker's defaults, so no
+`YOLO_PLAYER_CLASSES`/`YOLO_BALL_CLASSES`/`YOLO_REFEREE_CLASSES` overrides are needed —
+unlike the `keremberke/yolov5m-football` model above, this one also gives you a real
+referee class, so officials get excluded from team-color clustering correctly.
 
 ## Fine-tune a soccer detector
 

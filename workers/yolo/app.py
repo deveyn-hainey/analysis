@@ -1,8 +1,12 @@
 import base64
 import io
+import logging
 import os
 from dataclasses import dataclass
 from typing import Any, Literal
+
+logger = logging.getLogger("yolo_worker")
+logging.basicConfig(level=logging.INFO)
 
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 os.environ.setdefault("YOLO_CONFIG_DIR", "/tmp/Ultralytics")
@@ -17,6 +21,14 @@ from ultralytics import YOLO
 
 MODEL_PATH = os.getenv("YOLO_MODEL_PATH", "yolo11n.pt")
 MODEL_BACKEND = os.getenv("YOLO_BACKEND", "auto").lower()
+# For ultralytics checkpoints hosted on the HF Hub but not packaged for the
+# `ultralyticsplus`/`from_pretrained` style (e.g. Adit-jain/soccana, a YOLOv11n model
+# uploaded as a plain repo file rather than via Ultralytics' own HF integration), set
+# YOLO_MODEL_PATH to the repo id and YOLO_HF_FILENAME to the path of the .pt file
+# inside that repo. We resolve it to a local path via huggingface_hub before handing
+# it to ultralytics.YOLO() — this avoids the `ultralyticsplus` package, which as of
+# writing pins ultralytics==8.0.239 and silently fails on YOLO11 architectures.
+HF_FILENAME = os.getenv("YOLO_HF_FILENAME")
 CONFIDENCE = float(os.getenv("YOLO_CONFIDENCE", "0.25"))
 # The ball is a small, fast-moving object in wide broadcast shots, and the default
 # generic (non-soccer-trained) model misses it far more often than it misses players.
@@ -45,7 +57,20 @@ def use_huggingface_yolov5() -> bool:
         return True
     if MODEL_BACKEND == "ultralytics":
         return False
+    if HF_FILENAME:
+        # YOLO_HF_FILENAME only makes sense for an ultralytics checkpoint resolved via
+        # huggingface_hub — without this check the "repo/name" shape of MODEL_PATH would
+        # otherwise trip the yolov5 auto-detect heuristic below.
+        return False
     return "/" in MODEL_PATH and not MODEL_PATH.endswith(".pt")
+
+
+def resolve_ultralytics_model_path() -> str:
+    if not HF_FILENAME:
+        return MODEL_PATH
+    from huggingface_hub import hf_hub_download
+
+    return hf_hub_download(repo_id=MODEL_PATH, filename=HF_FILENAME)
 
 
 if use_huggingface_yolov5():
@@ -54,7 +79,39 @@ if use_huggingface_yolov5():
     model = yolov5.load(MODEL_PATH)
     model.conf = min(CONFIDENCE, BALL_CONFIDENCE)
 else:
-    model = YOLO(MODEL_PATH)
+    model = YOLO(resolve_ultralytics_model_path())
+
+
+def _validate_class_config() -> None:
+    # YOLO_PLAYER_CLASSES/YOLO_BALL_CLASSES/YOLO_REFEREE_CLASSES are matched against the
+    # model's own class names by exact string. A mismatch (e.g. configuring "ball" for a
+    # model that actually calls it "football") doesn't error — it just silently produces
+    # zero detections for that class, forever. Surface that loudly on startup instead of
+    # letting it fail quietly for an entire session.
+    model_names = {str(name).strip().lower() for name in model.names.values()}
+    if not (BALL_CLASSES & model_names):
+        logger.warning(
+            "YOLO_BALL_CLASSES=%s has no overlap with this model's classes %s — "
+            "ball detection will silently return nothing. Check the model's real "
+            "class names and fix YOLO_BALL_CLASSES.",
+            sorted(BALL_CLASSES), sorted(model_names),
+        )
+    if not (PLAYER_CLASSES & model_names):
+        logger.warning(
+            "YOLO_PLAYER_CLASSES=%s has no overlap with this model's classes %s — "
+            "player detection will silently return nothing. Check the model's real "
+            "class names and fix YOLO_PLAYER_CLASSES.",
+            sorted(PLAYER_CLASSES), sorted(model_names),
+        )
+    if not (REFEREE_CLASSES & model_names):
+        logger.info(
+            "YOLO_REFEREE_CLASSES=%s has no overlap with this model's classes %s — "
+            "referees (if any) will be treated as players for team clustering.",
+            sorted(REFEREE_CLASSES), sorted(model_names),
+        )
+
+
+_validate_class_config()
 
 
 class RawFrame(BaseModel):
