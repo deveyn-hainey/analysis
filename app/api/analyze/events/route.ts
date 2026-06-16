@@ -4,6 +4,7 @@ import type { AnalyzeEventsRequest, FrameData, MatchEvent, TeamId } from "@/lib/
 
 const EVENT_MODEL = process.env.ANTHROPIC_EVENT_MODEL ?? process.env.ANTHROPIC_SUMMARY_MODEL ?? "claude-sonnet-4-6";
 const EVENT_REVIEW_BATCH_SIZE = 8;
+const EVENT_REVIEW_MAX_ATTEMPTS = 2;
 
 interface RawEvent {
   frameIndex: number;
@@ -34,12 +35,22 @@ type TextBlock = { type: "text"; text: string };
 type ReviewContentBlock = ImageBlock | TextBlock;
 
 function cleanJson(text: string) {
-  return text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
+  const trimmed = text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
+  const firstObject = trimmed.indexOf("{");
+  const lastObject = trimmed.lastIndexOf("}");
+  if (firstObject >= 0 && lastObject > firstObject) {
+    return trimmed.slice(firstObject, lastObject + 1);
+  }
+  return trimmed;
 }
 
 function errorMessage(err: unknown) {
   if (err instanceof Error) return err.message;
   return String(err);
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function eventId(frameIndex: number, eventIndex: number, type: string, timestamp: number) {
@@ -359,6 +370,106 @@ function candidateWindows(frames: FrameData[]) {
   return candidates.slice(0, 12);
 }
 
+type CandidateWindow = ReturnType<typeof candidateWindows>[number];
+
+function fallbackEventForCandidate(
+  frame: FrameData,
+  candidate: CandidateWindow
+): RawEvent | null {
+  const team = frame.possession === "home" || frame.possession === "away"
+    ? frame.possession
+    : undefined;
+
+  if (candidate.candidate_type === "possible_goal_or_save") {
+    return {
+      frameIndex: frame.frameIndex,
+      timestamp: frame.timestamp,
+      type: "shot",
+      team,
+      description: "Unverified shot/save candidate from YOLO ball location near the goal zone",
+      confidence: 0.38,
+      position: frame.ballPosition,
+      evidence_used: ["YOLO placed the ball in the goal zone", "Claude event review was unavailable for this window"],
+      conflicts: ["not confirmed by Claude vision review"],
+      pipeline_flag: "low_confidence",
+    };
+  }
+
+  if (candidate.candidate_type === "possible_shot" || candidate.candidate_type === "possible_shot_save_or_deflection") {
+    return {
+      frameIndex: frame.frameIndex,
+      timestamp: frame.timestamp,
+      type: "shot",
+      team,
+      description: "Unverified shot candidate from YOLO ball movement in the attacking third",
+      confidence: 0.35,
+      position: frame.ballPosition,
+      evidence_used: ["YOLO attacking-third ball position or direction change", "Claude event review was unavailable for this window"],
+      conflicts: ["not confirmed by Claude vision review"],
+      pipeline_flag: "low_confidence",
+    };
+  }
+
+  if (candidate.candidate_type === "possible_corner_or_goal_kick") {
+    return {
+      frameIndex: frame.frameIndex,
+      timestamp: frame.timestamp,
+      type: "corner",
+      team,
+      description: "Unverified corner/byline restart candidate from YOLO ball location",
+      confidence: 0.32,
+      position: frame.ballPosition,
+      evidence_used: ["YOLO placed the ball near the byline/corner area", "Claude event review was unavailable for this window"],
+      conflicts: ["could be corner, goal kick, or open play"],
+      pipeline_flag: "low_confidence",
+    };
+  }
+
+  if (candidate.candidate_type === "possible_turnover_or_tackle") {
+    return {
+      frameIndex: frame.frameIndex,
+      timestamp: frame.timestamp,
+      type: "tackle",
+      team,
+      description: "Unverified possession turnover candidate from YOLO tracking",
+      confidence: 0.34,
+      position: frame.ballPosition,
+      semantic_label: "high_press_turnover",
+      evidence_used: ["YOLO possession estimate changed between sampled frames", "Claude event review was unavailable for this window"],
+      conflicts: ["classified as tackle/turnover from tracking signal only"],
+      pipeline_flag: "low_confidence",
+    };
+  }
+
+  return null;
+}
+
+function fallbackUpdatesForFrames(
+  frames: FrameData[],
+  candidates: ReturnType<typeof candidateWindows>
+): RawFrameUpdate[] {
+  const framesByIndex = new Map(frames.map((frame) => [frame.frameIndex, frame]));
+  const updates = new Map<number, RawFrameUpdate>();
+
+  for (const candidate of candidates) {
+    const frame = framesByIndex.get(candidate.frameIndex);
+    if (!frame) continue;
+
+    const update = updates.get(frame.frameIndex) ?? {
+      frameIndex: frame.frameIndex,
+      possession: frame.possession,
+      events: [],
+    };
+    const fallback = fallbackEventForCandidate(frame, candidate);
+    if (fallback) {
+      update.events = [...(update.events ?? []), fallback];
+      updates.set(frame.frameIndex, update);
+    }
+  }
+
+  return [...updates.values()];
+}
+
 function buildReviewContent(
   images: AnalyzeEventsRequest["images"],
   compactFrames: Array<Record<string, unknown>>,
@@ -485,14 +596,26 @@ async function reviewFrameBatch(
     frameIndexes.has(candidate.frameIndex)
   );
 
-  const response = await client.messages.create({
-    model: EVENT_MODEL,
-    max_tokens: 1800,
-    messages: [{ role: "user", content: buildReviewContent(images, compactFrames, batchCandidates) }],
-  });
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= EVENT_REVIEW_MAX_ATTEMPTS; attempt++) {
+    try {
+      const response = await client.messages.create({
+        model: EVENT_MODEL,
+        max_tokens: 1800,
+        messages: [{ role: "user", content: buildReviewContent(images, compactFrames, batchCandidates) }],
+      });
 
-  const raw = response.content[0].type === "text" ? response.content[0].text : "{}";
-  return JSON.parse(cleanJson(raw)) as RawEventReview;
+      const raw = response.content[0].type === "text" ? response.content[0].text : "{}";
+      return JSON.parse(cleanJson(raw)) as RawEventReview;
+    } catch (err) {
+      lastError = err;
+      if (attempt < EVENT_REVIEW_MAX_ATTEMPTS) {
+        await sleep(700 * attempt);
+      }
+    }
+  }
+
+  throw lastError;
 }
 
 export async function POST(req: NextRequest) {
