@@ -122,6 +122,11 @@ export default function EventTimeline({
                   Evidence: {event.evidenceUsed.slice(0, 2).join("; ")}
                 </p>
               )}
+              {((event.conflicts?.length ?? 0) > 0 || event.pipelineFlag) && (
+                <p className="text-xs text-amber-300/90 mt-1">
+                  Review: {event.conflicts?.slice(0, 2).join("; ") || event.pipelineFlag?.replaceAll("_", " ")}
+                </p>
+              )}
             </div>
 
             <div className="flex-shrink-0 text-right">

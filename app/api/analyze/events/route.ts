@@ -6,7 +6,8 @@ const EVENT_MODEL = process.env.ANTHROPIC_EVENT_MODEL ?? process.env.ANTHROPIC_S
 
 interface RawEvent {
   frameIndex: number;
-  type: MatchEvent["type"];
+  timestamp?: number;
+  type: string;
   team?: TeamId;
   description: string;
   confidence?: number;
@@ -14,6 +15,7 @@ interface RawEvent {
   semantic_label?: string | null;
   evidence_used?: string[];
   conflicts?: string[];
+  pipeline_flag?: MatchEvent["pipelineFlag"];
 }
 
 interface RawFrameUpdate {
@@ -30,8 +32,8 @@ function cleanJson(text: string) {
   return text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
 }
 
-function eventId(frameIndex: number, eventIndex: number, type: string) {
-  return `f${frameIndex}-review-${eventIndex}-${type}`;
+function eventId(frameIndex: number, eventIndex: number, type: string, timestamp: number) {
+  return `f${frameIndex}-review-${eventIndex}-${Math.round(timestamp * 10)}-${type}`;
 }
 
 function isKeyMoment(type: MatchEvent["type"]) {
@@ -69,6 +71,7 @@ function normalizeEventType(type: string): MatchEvent["type"] | null {
 
 function mergeReviewedFrames(frames: FrameData[], review: RawEventReview): FrameData[] {
   const updates = new Map((review.frames ?? []).map((frame) => [frame.frameIndex, frame]));
+  const frameTimestamps = frames.map((frame) => frame.timestamp);
 
   return frames.map((frame) => {
     const update = updates.get(frame.frameIndex);
@@ -77,9 +80,17 @@ function mergeReviewedFrames(frames: FrameData[], review: RawEventReview): Frame
     const reviewedEvents: MatchEvent[] = (update.events ?? []).flatMap((event, i) => {
       const type = normalizeEventType(event.type);
       if (!type) return [];
+      const rawTimestamp =
+        typeof event.timestamp === "number" && Number.isFinite(event.timestamp)
+          ? event.timestamp
+          : frame.timestamp;
+      const closestTimestamp = frameTimestamps.reduce((best, timestamp) =>
+        Math.abs(timestamp - rawTimestamp) < Math.abs(best - rawTimestamp) ? timestamp : best
+      , frame.timestamp);
+      const timestamp = Math.abs(rawTimestamp - closestTimestamp) <= 4 ? closestTimestamp : frame.timestamp;
       return [{
-        id: eventId(frame.frameIndex, i, type),
-        timestamp: frame.timestamp,
+        id: eventId(frame.frameIndex, i, type, timestamp),
+        timestamp,
         type,
         team: event.team,
         description: event.description,
@@ -89,6 +100,7 @@ function mergeReviewedFrames(frames: FrameData[], review: RawEventReview): Frame
         semanticLabel: event.semantic_label ?? undefined,
         evidenceUsed: event.evidence_used,
         conflicts: event.conflicts,
+        pipelineFlag: event.pipeline_flag,
       }];
     });
 
@@ -247,6 +259,31 @@ function candidateWindows(frames: FrameData[]) {
           },
         });
       }
+
+      if (prev?.ballPosition && next?.ballPosition) {
+        const v1 = {
+          x: ball.x - prev.ballPosition.x,
+          y: ball.y - prev.ballPosition.y,
+        };
+        const v2 = {
+          x: next.ballPosition.x - ball.x,
+          y: next.ballPosition.y - ball.y,
+        };
+        const dot = v1.x * v2.x + v1.y * v2.y;
+        const nearBox = ball.x <= 28 || ball.x >= 72;
+        if (nearBox && dot < -40) {
+          candidates.push({
+            candidate_type: "possible_shot_save_or_deflection",
+            frameIndex: frame.frameIndex,
+            window,
+            signals: {
+              sudden_ball_direction_reversal_near_box: true,
+              possession_team: frame.possession,
+              nearest_players: nearest,
+            },
+          });
+        }
+      }
     }
 
     if (prev && prev.possession !== "contested" && frame.possession !== "contested" && prev.possession !== frame.possession) {
@@ -274,6 +311,38 @@ function candidateWindows(frames: FrameData[]) {
           instruction: "Use the image to correct possession and label only obvious high-value events.",
         },
       });
+    }
+
+    if (prev) {
+      const playerCountDelta = Math.abs(frame.players.length - prev.players.length);
+      const centroid = frame.players.length
+        ? {
+            x: frame.players.reduce((sum, player) => sum + player.position.x, 0) / frame.players.length,
+            y: frame.players.reduce((sum, player) => sum + player.position.y, 0) / frame.players.length,
+          }
+        : null;
+      const prevCentroid = prev.players.length
+        ? {
+            x: prev.players.reduce((sum, player) => sum + player.position.x, 0) / prev.players.length,
+            y: prev.players.reduce((sum, player) => sum + player.position.y, 0) / prev.players.length,
+          }
+        : null;
+      const centroidJump = centroid && prevCentroid
+        ? Math.hypot(centroid.x - prevCentroid.x, centroid.y - prevCentroid.y)
+        : 0;
+      if (playerCountDelta >= 6 || centroidJump >= 35) {
+        candidates.push({
+          candidate_type: "possible_camera_cut_replay_or_goal_aftermath",
+          frameIndex: frame.frameIndex,
+          window,
+          signals: {
+            camera_cut_or_replay_angle_possible: true,
+            player_count_delta: playerCountDelta,
+            centroid_jump: +centroidJump.toFixed(1),
+            instruction: "Check for replay/angle change before counting a new event.",
+          },
+        });
+      }
     }
   }
 
@@ -340,11 +409,13 @@ Return ONLY valid JSON:
           "type": "shot",
           "team": "home",
           "description": "Home attacker shoots from the edge of the box",
+          "timestamp": 24.0,
           "confidence": 0.82,
           "position": { "x": 78, "y": 48 },
           "semantic_label": "direct_play",
           "evidence_used": ["ball in attacking third", "nearest home player at ball"],
-          "conflicts": []
+          "conflicts": [],
+          "pipeline_flag": null
         }
       ]
     }
@@ -354,6 +425,7 @@ Return ONLY valid JSON:
 Rules:
 - possession must be "home", "away", or "contested".
 - Allowed event types: goal, shot, shot_saved, shot_off_target, corner, goal_kick, card_yellow, card_red, card_unknown, foul, freekick, offside, pass, tackle, throw-in, dribble.
+- Every event MUST include a numeric timestamp copied from one of the supplied frame timestamps. Do not infer time from frame order alone.
 - Only report events visible or strongly implied inside candidate windows.
 - Do not create an event for every frame.
 - If no candidate is convincing, return an empty events array for that frame.
@@ -364,8 +436,11 @@ Goal rules:
 - Strong confirmation: visible ball in net, keeper retrieving from net, clear scoreboard score change, or obvious non-half-boundary kickoff aftermath.
 - Supporting signals: ball in goal zone, ball disappears in goalmouth, celebration cluster near goal, defending shape collapse.
 - Rejection signals: keeper catches/parries, ball visible wide/above goal, restart appears to be corner/goal kick, no score/restart evidence.
+- Goal recall triggers include ball direction reversal near the box and possible camera cut/replay/angle change after an attacking moment. These triggers should cause verification, not automatic confirmation.
 - Never confirm a goal solely from celebration or pressure near the box.
 - If ambiguous, label shot or no event with lower confidence rather than goal.
+- Replays and camera cuts are a known limitation. If a frame appears to be a replay or angle cut, add "replay_suspected" to pipeline_flag and do not count a fresh live event unless the timestamp window clearly shows live play.
+- If evidence conflicts, keep the event only when confidence remains justified and put the disagreement in conflicts. Use pipeline_flag "verifier_conflict" or "scoreboard_conflict" when appropriate.
 
 Semantic labels after confirmation:
 - counterattack_goal

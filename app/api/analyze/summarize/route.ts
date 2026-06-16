@@ -48,27 +48,59 @@ function countEventType(events: MatchEvent[], type: string, team?: TeamId) {
   return events.filter((e) => e.type === type && (!team || e.team === team)).length;
 }
 
-/**
- * Remove duplicate goal events caused by a celebration being visible across
- * multiple consecutive frames. Two goals for the same team within MIN_GAP
- * seconds are treated as the same goal — real goals require at least a kickoff
- * reset before another can be scored.
- */
-function deduplicateGoals(events: MatchEvent[]): MatchEvent[] {
-  const MIN_GAP = 12; // seconds
-  const nonGoals = events.filter((e) => e.type !== "goal");
-  const goals = events
-    .filter((e) => e.type === "goal")
-    .sort((a, b) => a.timestamp - b.timestamp);
+function duplicateWindowSeconds(type: MatchEvent["type"]) {
+  if (type === "goal") return 12;
+  if (["shot", "save", "corner", "goal-kick", "freekick", "foul", "offside", "card_yellow", "card_red", "card_unknown"].includes(type)) {
+    return 6;
+  }
+  return 3;
+}
 
-  const deduped: MatchEvent[] = [];
-  for (const goal of goals) {
-    const lastSameTeam = [...deduped].reverse().find((g) => g.team === goal.team);
-    if (!lastSameTeam || goal.timestamp - lastSameTeam.timestamp >= MIN_GAP) {
-      deduped.push(goal);
+function mergeDuplicateEvents(events: MatchEvent[]): MatchEvent[] {
+  const sorted = [...events]
+    .filter((event) => event.pipelineFlag !== "replay_suspected")
+    .sort((a, b) => a.timestamp - b.timestamp || b.confidence - a.confidence);
+
+  const merged: MatchEvent[] = [];
+  for (const event of sorted) {
+    const duplicate = merged.find((existing) =>
+      existing.type === event.type &&
+      existing.team === event.team &&
+      Math.abs(existing.timestamp - event.timestamp) <= duplicateWindowSeconds(event.type)
+    );
+
+    if (!duplicate) {
+      merged.push(event);
+      continue;
+    }
+
+    const replaceDetails = event.confidence > duplicate.confidence;
+    duplicate.confidence = Math.max(duplicate.confidence, event.confidence);
+    duplicate.evidenceUsed = [...new Set([...(duplicate.evidenceUsed ?? []), ...(event.evidenceUsed ?? [])])];
+    duplicate.conflicts = [...new Set([...(duplicate.conflicts ?? []), ...(event.conflicts ?? [])])];
+    if (!duplicate.semanticLabel && event.semanticLabel) duplicate.semanticLabel = event.semanticLabel;
+    if (!duplicate.pipelineFlag && event.pipelineFlag) duplicate.pipelineFlag = event.pipelineFlag;
+    if (replaceDetails) {
+      duplicate.description = event.description;
+      duplicate.position = event.position ?? duplicate.position;
     }
   }
-  return [...nonGoals, ...deduped];
+
+  return merged;
+}
+
+function buildEventConflicts(events: MatchEvent[]): MatchAnalysis["eventConflicts"] {
+  return events
+    .filter((event) => (event.conflicts?.length ?? 0) > 0 || event.pipelineFlag)
+    .map((event) => ({
+      timestamp: event.timestamp,
+      type: event.type,
+      team: event.team,
+      description: event.description,
+      conflicts: event.conflicts ?? [],
+      evidenceUsed: event.evidenceUsed,
+      pipelineFlag: event.pipelineFlag,
+    }));
 }
 
 function buildTeamAnalysis(
@@ -212,7 +244,8 @@ function buildFallbackInsights(
 async function generateInsights(
   client: Anthropic,
   homeTeam: TeamAnalysis,
-  awayTeam: TeamAnalysis
+  awayTeam: TeamAnalysis,
+  eventConflicts: MatchAnalysis["eventConflicts"] = []
 ): Promise<CoachingInsight[]> {
   const prompt = `You are an elite soccer performance analyst reviewing a short match clip.
 
@@ -231,6 +264,13 @@ AWAY (${awayTeam.name}):
 - Shots: ${awayTeam.stats.shots} (on target: ${awayTeam.stats.shotsOnTarget}) | Goals: ${awayTeam.stats.goals}
 - Tackles: ${awayTeam.stats.tackles} | Fouls: ${awayTeam.stats.fouls} | Corners: ${awayTeam.stats.corners}
 - Avg player x-position: ${awayTeam.averagePosition.x}/100
+
+EVENT CONFLICTS / REVIEW FLAGS:
+${eventConflicts.length > 0
+  ? eventConflicts.slice(0, 6).map((event) =>
+      `- ${event.timestamp.toFixed(1)}s ${event.type}: ${(event.conflicts ?? []).join("; ") || event.pipelineFlag || "review flag"}`
+    ).join("\n")
+  : "- None"}
 
 Return ONLY a valid JSON array — no markdown, no code fences:
 [{
@@ -286,13 +326,14 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "No frames provided." }, { status: 400 });
     }
 
-    const allEvents = deduplicateGoals(frames.flatMap((f) => f.events));
+    const allEvents = mergeDuplicateEvents(frames.flatMap((f) => f.events));
+    const eventConflicts = buildEventConflicts(allEvents);
 
     const homeTeam = buildTeamAnalysis("home", frames, allEvents);
     const awayTeam = buildTeamAnalysis("away", frames, allEvents);
 
     const client = new Anthropic({ apiKey });
-    const insights = await generateInsights(client, homeTeam, awayTeam);
+    const insights = await generateInsights(client, homeTeam, awayTeam, eventConflicts);
 
     const analysis: MatchAnalysis = {
       id: `match-${Date.now()}`,
@@ -303,6 +344,11 @@ export async function POST(req: NextRequest) {
       awayTeam,
       frames,
       keyEvents: allEvents,
+      eventConflicts,
+      analysisWarnings: [
+        "Replay and broadcast angle changes are flagged when detected, but may still require coach review.",
+        "Possession is sampled from frame-level visual evidence, not counted as timeline events.",
+      ],
       insights,
       score: {
         home: countEventType(allEvents, "goal", "home"),

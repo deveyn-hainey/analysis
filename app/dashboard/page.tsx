@@ -12,6 +12,7 @@ import {
   Cpu,
   Route,
   Target,
+  AlertTriangle,
 } from "lucide-react";
 import type { MatchAnalysis, FrameData } from "@/lib/types";
 import SoccerField from "@/components/SoccerField";
@@ -214,6 +215,18 @@ function DashboardContent() {
             </div>
           </div>
         </div>
+
+        {((analysis.analysisWarnings?.length ?? 0) > 0 || (analysis.eventConflicts?.length ?? 0) > 0) && (
+          <div className="border border-amber-400/25 bg-amber-400/10 rounded-lg p-3 flex items-start gap-3">
+            <AlertTriangle className="w-4 h-4 text-amber-300 mt-0.5 flex-shrink-0" />
+            <div className="text-xs text-amber-100/90 leading-relaxed">
+              <div className="font-semibold text-amber-200">Review flags</div>
+              <div>
+                {(analysis.eventConflicts?.length ?? 0)} event conflict(s). {analysis.analysisWarnings?.[0]}
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* ── PLAYER MODE ── */}
         {viewMode === "player" && (

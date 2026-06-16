@@ -56,6 +56,7 @@ export interface MatchEvent {
   semanticLabel?: string;
   evidenceUsed?: string[];
   conflicts?: string[];
+  pipelineFlag?: "missed_detection" | "scoreboard_conflict" | "replay_suspected" | "verifier_conflict" | "low_confidence";
 }
 
 export interface FrameData {
@@ -111,6 +112,16 @@ export interface MatchAnalysis {
   awayTeam: TeamAnalysis;
   frames: FrameData[];
   keyEvents: MatchEvent[];
+  eventConflicts?: Array<{
+    timestamp: number;
+    type: EventType;
+    team?: TeamId;
+    description: string;
+    conflicts: string[];
+    evidenceUsed?: string[];
+    pipelineFlag?: MatchEvent["pipelineFlag"];
+  }>;
+  analysisWarnings?: string[];
   insights: CoachingInsight[];
   score: { home: number; away: number };
   processingMethod: "ai" | "demo";
