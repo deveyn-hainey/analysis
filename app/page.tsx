@@ -19,9 +19,10 @@ import { videoStore } from "@/lib/videoStore";
 import { frameImageStore } from "@/lib/frameImageStore";
 
 const ACCEPTED_TYPES = ["video/mp4", "video/webm", "video/ogg", "video/quicktime"];
-const FRAME_ANALYSIS_CONCURRENCY = 2;
+const FRAME_ANALYSIS_CONCURRENCY = 4;
 const MAX_FRAME_RETRIES = 1;
 const MAX_FAILED_FRAME_RATIO = 0.3;
+const SEND_PREVIOUS_FRAME_CONTEXT = false;
 
 type RawFrame = { base64: string; timestamp: number };
 
@@ -144,8 +145,8 @@ async function analyzeFrames(
         base64: rawFrame.base64,
         timestamp: rawFrame.timestamp,
         frameIndex: i,
-        prevBase64: prev?.base64,
-        prevTimestamp: prev?.timestamp,
+        prevBase64: SEND_PREVIOUS_FRAME_CONTEXT ? prev?.base64 : undefined,
+        prevTimestamp: SEND_PREVIOUS_FRAME_CONTEXT ? prev?.timestamp : undefined,
       };
 
       try {

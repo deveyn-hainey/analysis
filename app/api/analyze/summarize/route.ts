@@ -10,6 +10,8 @@ import type {
   TeamId,
 } from "@/lib/types";
 
+const SUMMARY_MODEL = process.env.ANTHROPIC_SUMMARY_MODEL ?? "claude-sonnet-4-6";
+
 function calcDistanceCovered(teamId: TeamId, frames: FrameData[]): number {
   const PITCH_M_X = 105;
   const PITCH_M_Y = 68;
@@ -243,7 +245,7 @@ affectedTeam: home | away | both`;
 
   try {
     const response = await client.messages.create({
-      model: "claude-sonnet-4-6",
+      model: SUMMARY_MODEL,
       max_tokens: 2048,
       messages: [{ role: "user", content: prompt }],
     });
