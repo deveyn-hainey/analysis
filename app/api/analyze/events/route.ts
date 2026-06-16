@@ -957,23 +957,15 @@ export async function POST(req: NextRequest) {
     const reviewedFrames = mergeReviewedFrames(frames, {
       frames: [...fallbackUpdates, ...reviewedUpdates],
     });
-    const framesWithScoreboardGoals = synthesizeGoalsFromScoreboard(reviewedFrames);
 
-    // If any frame in this batch has a readable scoreboard, it is the ground truth.
-    // Strip visually-detected goal events so they don't double-count alongside the
-    // scoreboard-synthesized ones. When no scoreboard is present, keep visual goals.
-    const hasScoreboard = framesWithScoreboardGoals.some((f) => f.scoreboard != null);
-    const finalFrames = hasScoreboard
-      ? framesWithScoreboardGoals.map((f) => ({
-          ...f,
-          events: f.events.filter(
-            (e) => e.type !== "goal" || e.id.includes("-scoreboard-goal-")
-          ),
-        }))
-      : framesWithScoreboardGoals;
-
+    // Scoreboard synthesis and goal deduplication are intentionally NOT run here.
+    // The client batches requests (one per 8 frames) and each batch would start
+    // runningMax at 0, causing every batch that contains a "1-0" scoreboard frame
+    // to independently fire a goal — producing duplicates (e.g. three "1-0" goals
+    // instead of one). The client merges all batch results and runs synthesis once
+    // across the full clip where runningMax correctly tracks across all frames.
     return NextResponse.json({
-      frames: synthesizeMovementEvents(finalFrames),
+      frames: synthesizeMovementEvents(reviewedFrames),
       warnings: reviewWarnings,
     });
   } catch (err) {

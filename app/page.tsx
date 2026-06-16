@@ -279,15 +279,16 @@ function resizeFramesForReview(
   height = 540,
   quality = 0.78
 ): Promise<RawFrame[]> {
-  const canvas = document.createElement("canvas");
-  canvas.width = width;
-  canvas.height = height;
-  const ctx = canvas.getContext("2d")!;
-
+  // Each frame gets its own canvas — sharing one canvas across concurrent onload
+  // callbacks causes them to overwrite each other mid-draw, producing corrupt images.
   return Promise.all(
     frames.map(
       (f) =>
         new Promise<RawFrame>((resolve) => {
+          const canvas = document.createElement("canvas");
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext("2d")!;
           const img = new Image();
           img.onload = () => {
             ctx.drawImage(img, 0, 0, width, height);
