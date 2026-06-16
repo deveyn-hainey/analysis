@@ -329,7 +329,7 @@ export async function POST(req: NextRequest) {
     }
 
     const body = (await req.json()) as SummarizeRequest;
-    const { frames } = body;
+    const { frames, eventReviewWarnings } = body;
 
     if (!frames || frames.length === 0) {
       return NextResponse.json({ error: "No frames provided." }, { status: 400 });
@@ -357,6 +357,7 @@ export async function POST(req: NextRequest) {
       analysisWarnings: [
         "Replay and broadcast angle changes are flagged when detected, but may still require coach review.",
         "Possession is sampled from frame-level visual evidence, not counted as timeline events.",
+        ...(eventReviewWarnings ?? []),
       ],
       insights,
       score: {

@@ -203,7 +203,10 @@ async function analyzeFramesWithWorker(rawFrames: RawFrame[]): Promise<FrameData
   return data.frames;
 }
 
-async function reviewEventsWithClaude(rawFrames: RawFrame[], frames: FrameData[]): Promise<FrameData[]> {
+async function reviewEventsWithClaude(
+  rawFrames: RawFrame[],
+  frames: FrameData[]
+): Promise<{ frames: FrameData[]; warnings: string[] }> {
   const payload: AnalyzeEventsRequest = {
     images: rawFrames,
     frames,
@@ -220,12 +223,12 @@ async function reviewEventsWithClaude(rawFrames: RawFrame[], frames: FrameData[]
     throw new Error((err as { error?: string }).error ?? "Event review failed");
   }
 
-  const data = (await res.json()) as { frames?: FrameData[] };
+  const data = (await res.json()) as { frames?: FrameData[]; warnings?: string[] };
   if (!data.frames || data.frames.length === 0) {
     throw new Error("Event review returned no frames");
   }
 
-  return data.frames;
+  return { frames: data.frames, warnings: data.warnings ?? [] };
 }
 
 export default function HomePage() {
@@ -271,12 +274,15 @@ export default function HomePage() {
         setProgress(36);
 
         let analyzedFrames: FrameData[];
+        let eventReviewWarnings: string[] = [];
         if (VISION_WORKER_URL) {
           try {
             analyzedFrames = await analyzeFramesWithWorker(rawFrames);
             setProgress(72);
             setStatusDetail("Reviewing YOLO detections for match events…");
-            analyzedFrames = await reviewEventsWithClaude(rawFrames, analyzedFrames);
+            const reviewed = await reviewEventsWithClaude(rawFrames, analyzedFrames);
+            analyzedFrames = reviewed.frames;
+            eventReviewWarnings = reviewed.warnings;
             setProgress(86);
             setStatusDetail(`Reviewed ${analyzedFrames.length} frames for events…`);
           } catch (err) {
@@ -313,7 +319,7 @@ export default function HomePage() {
         const sumRes = await fetch("/api/analyze/summarize", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ frames: analyzedFrames }),
+          body: JSON.stringify({ frames: analyzedFrames, eventReviewWarnings }),
         });
 
         if (!sumRes.ok) {

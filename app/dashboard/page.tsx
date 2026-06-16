@@ -221,9 +221,10 @@ function DashboardContent() {
             <AlertTriangle className="w-4 h-4 text-amber-300 mt-0.5 flex-shrink-0" />
             <div className="text-xs text-amber-100/90 leading-relaxed">
               <div className="font-semibold text-amber-200">Review flags</div>
-              <div>
-                {(analysis.eventConflicts?.length ?? 0)} event conflict(s). {analysis.analysisWarnings?.[0]}
-              </div>
+              <div>{(analysis.eventConflicts?.length ?? 0)} event conflict(s).</div>
+              {analysis.analysisWarnings?.map((warning, i) => (
+                <div key={i}>{warning}</div>
+              ))}
             </div>
           </div>
         )}

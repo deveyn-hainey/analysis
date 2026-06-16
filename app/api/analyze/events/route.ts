@@ -4,7 +4,7 @@ import type { AnalyzeEventsRequest, FrameData, MatchEvent, TeamId } from "@/lib/
 
 const EVENT_MODEL = process.env.ANTHROPIC_EVENT_MODEL ?? process.env.ANTHROPIC_SUMMARY_MODEL ?? "claude-sonnet-4-6";
 const EVENT_REVIEW_BATCH_SIZE = 8;
-const EVENT_REVIEW_MAX_ATTEMPTS = 2;
+const EVENT_REVIEW_MAX_ATTEMPTS = 3;
 const MAX_CANDIDATE_WINDOWS = 40;
 const DRIBBLE_DISTANCE_THRESHOLD = 6;
 const PASS_DISTANCE_THRESHOLD = 16;
@@ -27,6 +27,7 @@ interface RawFrameUpdate {
   frameIndex: number;
   possession?: TeamId | "contested";
   events?: RawEvent[];
+  scoreboard?: { home: number; away: number } | null;
 }
 
 interface RawEventReview {
@@ -101,6 +102,7 @@ function mergeReviewedFrames(frames: FrameData[], review: RawEventReview): Frame
       frameIndex: frameUpdate.frameIndex,
       possession: frameUpdate.possession ?? existing?.possession,
       events: [...(existing?.events ?? []), ...(frameUpdate.events ?? [])],
+      scoreboard: frameUpdate.scoreboard ?? existing?.scoreboard,
     });
   }
   const frameTimestamps = frames.map((frame) => frame.timestamp);
@@ -140,12 +142,58 @@ function mergeReviewedFrames(frames: FrameData[], review: RawEventReview): Frame
       ...frame,
       possession: update.possession ?? frame.possession,
       events: [...frame.events, ...reviewedEvents],
+      scoreboard: update.scoreboard !== undefined ? update.scoreboard : frame.scoreboard,
     };
   });
 }
 
 function eventKey(event: MatchEvent) {
   return `${Math.round(event.timestamp)}-${event.team ?? "none"}-${event.type}`;
+}
+
+// Confirms goals from scoreboard reads alone, comparing every frame's scoreboard
+// across the whole clip — not just within one Claude review batch. This is what
+// catches a goal whose live action was never confirmed (candidate heuristics missed
+// it, or that batch's Claude review call failed/timed out/was skipped) but whose
+// aftermath frame still legibly shows the new score. A scoreboard digit read is a
+// much stronger, near-deterministic signal than ball-near-goal-zone proximity, so
+// this runs independent of pipelineFlag/low_confidence and isn't gated on any
+// particular batch having succeeded.
+function synthesizeGoalsFromScoreboard(frames: FrameData[]): FrameData[] {
+  const sorted = [...frames].sort((a, b) => a.timestamp - b.timestamp);
+  const runningMax: Record<TeamId, number> = { home: 0, away: 0 };
+  const additions = new Map<number, MatchEvent[]>();
+
+  for (const frame of sorted) {
+    if (!frame.scoreboard) continue;
+    for (const team of ["home", "away"] as TeamId[]) {
+      const seen = frame.scoreboard[team];
+      // Use the running max (not just the previous frame) as the baseline so a
+      // single misread frame that shows a lower score after the real goal doesn't
+      // get treated as a second event, and a goal already counted doesn't repeat.
+      if (typeof seen === "number" && Number.isFinite(seen) && seen > runningMax[team]) {
+        const event: MatchEvent = {
+          id: `f${frame.frameIndex}-scoreboard-goal-${team}-${seen}`,
+          timestamp: frame.timestamp,
+          type: "goal",
+          team,
+          description: `Scoreboard read ${frame.scoreboard.home}-${frame.scoreboard.away} — ${team === "home" ? "Home" : "Away"} goal confirmed from score overlay`,
+          confidence: 0.92,
+          isKeyMoment: true,
+          evidenceUsed: [`scoreboard read ${seen} for ${team}, up from ${runningMax[team]} previously observed in this clip`],
+        };
+        additions.set(frame.frameIndex, [...(additions.get(frame.frameIndex) ?? []), event]);
+        runningMax[team] = seen;
+      }
+    }
+  }
+
+  if (additions.size === 0) return frames;
+  return frames.map((frame) =>
+    additions.has(frame.frameIndex)
+      ? { ...frame, events: [...frame.events, ...additions.get(frame.frameIndex)!] }
+      : frame
+  );
 }
 
 function synthesizeMovementEvents(frames: FrameData[]): FrameData[] {
@@ -585,6 +633,7 @@ Upstream already ran:
 - simple deterministic candidate generation from ball location and possession changes
 
 Your job:
+- For every supplied frame image, scan for a scoreboard/score overlay and report it (see SCOREBOARD READING below) — do this independent of whether you confirm any event for that frame.
 - Verify candidate windows using the images and YOLO metadata.
 - Correct possession only when the visual evidence is clearer than YOLO's nearest-player estimate.
 - Build a useful event timeline, not only rare highlights.
@@ -594,12 +643,19 @@ Your job:
 - If YOLO missed the ball, use the frame image to set possession when one team is clearly in controlled possession.
 - If no major event is visible, still return possession corrections and routine ball-progression events where the metadata and image support them.
 
+SCOREBOARD READING (do this for every frame, separate from event confirmation):
+- Scan every corner/edge of the image for a score overlay, ticker, or graphic (e.g. "1-0", "USA 1 PAR 0").
+- If legible, report the exact numeric score as {"home": <int>, "away": <int>} using the same team labels as possession.
+- If no scoreboard is visible or you can't read it confidently, report it as null. Do not guess.
+- You do NOT need to compare this to other batches or remember prior scores — just report what this single frame shows. Score increases are detected deterministically downstream by comparing your readings across every frame in the clip, including frames reviewed in other batches. This means you don't need certainty about whether a score "changed" to report it — an accurate reading of a frame that already shows the post-goal score is exactly what's needed, even if you have no visual record of the goal itself.
+
 Return ONLY valid JSON:
 {
   "frames": [
     {
       "frameIndex": 0,
       "possession": "home",
+      "scoreboard": { "home": 1, "away": 0 },
       "events": [
         {
           "frameIndex": 0,
@@ -618,6 +674,7 @@ Return ONLY valid JSON:
     }
   ]
 }
+"scoreboard" must be present on every frame entry — use null when not legible.
 
 Rules:
 - possession must be "home", "away", or "contested".
@@ -639,7 +696,8 @@ Routine event rules:
 
 Goal rules:
 - Do NOT confirm a goal from one weak signal.
-- Strong confirmation: visible ball in net, keeper retrieving from net, clear scoreboard score change, or obvious non-half-boundary kickoff aftermath.
+- Strong confirmation: visible ball in net, keeper retrieving from net, or obvious non-half-boundary kickoff aftermath, all within this batch's own images.
+- Do NOT emit a goal event yourself just because this frame's scoreboard shows a goal already happened — you only see this batch, not the whole clip, so you can't tell if that score is new or was already there before this batch started. Just report it accurately in the "scoreboard" field above; an increase is detected automatically by comparing your readings across the whole clip, including frames outside this batch.
 - Supporting signals: ball in goal zone, ball disappears in goalmouth, celebration cluster near goal, defending shape collapse.
 - Rejection signals: keeper catches/parries, ball visible wide/above goal, restart appears to be corner/goal kick, no score/restart evidence.
 - Goal recall triggers include ball direction reversal near the box and possible camera cut/replay/angle change after an attacking moment. These triggers should cause verification, not automatic confirmation.
@@ -772,8 +830,9 @@ export async function POST(req: NextRequest) {
     const reviewedFrames = mergeReviewedFrames(frames, {
       frames: [...fallbackUpdates, ...reviewedUpdates],
     });
+    const framesWithScoreboardGoals = synthesizeGoalsFromScoreboard(reviewedFrames);
     return NextResponse.json({
-      frames: synthesizeMovementEvents(reviewedFrames),
+      frames: synthesizeMovementEvents(framesWithScoreboardGoals),
       warnings: reviewWarnings,
     });
   } catch (err) {

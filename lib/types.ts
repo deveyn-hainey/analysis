@@ -71,6 +71,12 @@ export interface FrameData {
   // Match officials detected separately from players (currently only populated by
   // the YOLO worker when the loaded model has a distinct referee class, e.g. soccana).
   referees?: Position[];
+  // Scoreboard overlay reading for this frame, when legible. Tracked per-frame
+  // (rather than asking Claude to compare across batches) so a goal can be
+  // confirmed deterministically from the score increasing between any two frames,
+  // even when they land in different review batches or a batch's event
+  // confirmation otherwise fails — see synthesizeGoalsFromScoreboard.
+  scoreboard?: { home: number; away: number } | null;
 }
 
 export interface TeamStats {
@@ -148,6 +154,10 @@ export interface AnalyzeFrameRequest {
 // Payload for final summarize step
 export interface SummarizeRequest {
   frames: FrameData[];
+  // Warnings from the /api/analyze/events review step (e.g. a batch's Claude call
+  // failed and fell back to heuristic-only events) — surfaced to the coach instead
+  // of being silently discarded, since it explains why some events lack full review.
+  eventReviewWarnings?: string[];
 }
 
 export interface AnalyzeEventsRequest {
