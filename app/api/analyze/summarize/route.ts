@@ -69,34 +69,6 @@ function deduplicateGoals(events: MatchEvent[]): MatchEvent[] {
   return [...nonGoals, ...deduped];
 }
 
-/**
- * Count passes by tracking possession changes across frames.
- * When the possessing player changes to a teammate (same team, different player ID),
- * that transition counts as one pass.
- */
-function countCrossFramePasses(frames: FrameData[], teamId: TeamId): number {
-  let passes = 0;
-  let lastPossessor: { team: TeamId; playerId: string } | null = null;
-
-  for (const frame of frames) {
-    const curr = frame.possessingPlayer;
-    if (!curr) continue;
-
-    if (
-      lastPossessor &&
-      lastPossessor.team === teamId &&
-      curr.team === teamId &&
-      lastPossessor.playerId !== curr.playerId
-    ) {
-      passes++;
-    }
-
-    lastPossessor = curr;
-  }
-
-  return passes;
-}
-
 function buildTeamAnalysis(
   id: TeamId,
   frames: FrameData[],
@@ -104,11 +76,9 @@ function buildTeamAnalysis(
 ): TeamAnalysis {
   const teamEvents = allEvents.filter((e) => e.team === id);
 
-  // Cross-frame pass counting is more accurate than event counting alone
-  const crossFramePasses = countCrossFramePasses(frames, id);
-  const eventPasses = countEventType(teamEvents, "pass");
-  const passCount = Math.max(crossFramePasses, eventPasses);
-
+  // Player IDs are assigned per frame by the vision model, so possession changes
+  // across frames are not stable enough to infer passes reliably.
+  const passCount = countEventType(teamEvents, "pass");
   const shotCount = countEventType(teamEvents, "shot");
   const possessionFrames = frames.filter((f) => f.possession === id).length;
   const possession = Math.round((possessionFrames / Math.max(frames.length, 1)) * 100);

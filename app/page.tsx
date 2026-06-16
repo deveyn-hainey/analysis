@@ -14,56 +14,16 @@ import {
   Cpu,
   BarChart3,
 } from "lucide-react";
-import type { AnalyzeFrameRequest, FrameData, MatchAnalysis, Player, MatchEvent } from "@/lib/types";
+import type { AnalyzeFrameRequest, FrameData, MatchAnalysis } from "@/lib/types";
 import { videoStore } from "@/lib/videoStore";
 import { frameImageStore } from "@/lib/frameImageStore";
 
-/** Merge two frame analysis passes: union of players/events, averaged positions/ball. */
-function mergeFrameResults(f1: FrameData, f2: FrameData): FrameData {
-  const playerMap = new Map<string, Player>();
-  for (const p of [...f1.players, ...f2.players]) {
-    if (playerMap.has(p.id)) {
-      const prev = playerMap.get(p.id)!;
-      playerMap.set(p.id, {
-        ...prev,
-        position: {
-          x: (prev.position.x + p.position.x) / 2,
-          y: (prev.position.y + p.position.y) / 2,
-        },
-      });
-    } else {
-      playerMap.set(p.id, p);
-    }
-  }
-
-  const seenEvent = new Set<string>();
-  const mergedEvents: MatchEvent[] = [];
-  for (const e of [...f1.events, ...f2.events]) {
-    const key = `${e.type}-${e.team ?? ""}`;
-    if (!seenEvent.has(key)) {
-      seenEvent.add(key);
-      mergedEvents.push(e);
-    }
-  }
-
-  const ball =
-    f1.ballPosition && f2.ballPosition
-      ? {
-          x: (f1.ballPosition.x + f2.ballPosition.x) / 2,
-          y: (f1.ballPosition.y + f2.ballPosition.y) / 2,
-        }
-      : f1.ballPosition ?? f2.ballPosition;
-
-  return {
-    ...f1,
-    players: [...playerMap.values()],
-    events: mergedEvents,
-    ballPosition: ball,
-    possession: f1.possession === f2.possession ? f1.possession : f1.possession,
-  };
-}
-
 const ACCEPTED_TYPES = ["video/mp4", "video/webm", "video/ogg", "video/quicktime"];
+const FRAME_ANALYSIS_CONCURRENCY = 2;
+const MAX_FRAME_RETRIES = 1;
+const MAX_FAILED_FRAME_RATIO = 0.3;
+
+type RawFrame = { base64: string; timestamp: number };
 
 function frameInterval(durationSeconds: number): number {
   return Math.max(2, Math.min(8, Math.round(durationSeconds / 16)));
@@ -72,7 +32,7 @@ function frameInterval(durationSeconds: number): number {
 function extractFrames(
   file: File,
   onProgress?: (pct: number) => void
-): Promise<Array<{ base64: string; timestamp: number }>> {
+): Promise<RawFrame[]> {
   return new Promise((resolve, reject) => {
     const video = document.createElement("video");
     const canvas = document.createElement("canvas");
@@ -122,6 +82,93 @@ function extractFrames(
   });
 }
 
+function sleep(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function emptyFrame(rawFrame: RawFrame, frameIndex: number): FrameData {
+  return {
+    frameIndex,
+    timestamp: rawFrame.timestamp,
+    players: [],
+    events: [],
+    possession: "contested",
+  };
+}
+
+async function analyzeFrame(payload: AnalyzeFrameRequest): Promise<FrameData> {
+  const res = await fetch("/api/analyze/frame", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: "Frame analysis failed" }));
+    throw new Error((err as { error?: string }).error ?? "Frame analysis failed");
+  }
+
+  return res.json() as Promise<FrameData>;
+}
+
+async function analyzeFrameWithRetry(payload: AnalyzeFrameRequest): Promise<FrameData> {
+  for (let attempt = 0; attempt <= MAX_FRAME_RETRIES; attempt++) {
+    try {
+      return await analyzeFrame(payload);
+    } catch (err) {
+      if (attempt === MAX_FRAME_RETRIES) throw err;
+      await sleep(600 * (attempt + 1));
+    }
+  }
+
+  throw new Error("Frame analysis failed");
+}
+
+async function analyzeFrames(
+  rawFrames: RawFrame[],
+  onProgress: (completed: number, failed: number) => void
+): Promise<{ frames: FrameData[]; failed: number }> {
+  const results: Array<FrameData | undefined> = new Array(rawFrames.length);
+  let nextIndex = 0;
+  let completed = 0;
+  let failed = 0;
+
+  async function worker() {
+    while (nextIndex < rawFrames.length) {
+      const i = nextIndex;
+      nextIndex++;
+
+      const rawFrame = rawFrames[i];
+      const prev = i > 0 ? rawFrames[i - 1] : undefined;
+      const payload: AnalyzeFrameRequest = {
+        base64: rawFrame.base64,
+        timestamp: rawFrame.timestamp,
+        frameIndex: i,
+        prevBase64: prev?.base64,
+        prevTimestamp: prev?.timestamp,
+      };
+
+      try {
+        results[i] = await analyzeFrameWithRetry(payload);
+      } catch {
+        failed++;
+        results[i] = emptyFrame(rawFrame, i);
+      } finally {
+        completed++;
+        onProgress(completed, failed);
+      }
+    }
+  }
+
+  const workerCount = Math.min(FRAME_ANALYSIS_CONCURRENCY, rawFrames.length);
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+
+  return {
+    frames: results.map((frame, i) => frame ?? emptyFrame(rawFrames[i], i)),
+    failed,
+  };
+}
+
 export default function HomePage() {
   const router = useRouter();
   const [dragOver, setDragOver] = useState(false);
@@ -148,69 +195,35 @@ export default function HomePage() {
           setStatusDetail("Capturing keyframes…");
         });
 
+        if (rawFrames.length === 0) {
+          throw new Error("No frames could be extracted from this video. Please try a longer clip.");
+        }
+
         // Store images so the dashboard can render actual-frame overlays
         frameImageStore.clear();
         rawFrames.forEach((f, i) => frameImageStore.set(i, f.base64));
 
         setStatus("analyzing");
-        setStatusDetail(`Sending ${rawFrames.length} frames to AI (dual-pass)…`);
+        setStatusDetail(`Analysing ${rawFrames.length} frames with AI…`);
         setProgress(36);
 
-        let completed = 0;
-        const analyzedFrames = await Promise.all(
-          rawFrames.map(async (rawFrame, i) => {
-            const prev = i > 0 ? rawFrames[i - 1] : undefined;
-            const payload: AnalyzeFrameRequest = {
-              base64: rawFrame.base64,
-              timestamp: rawFrame.timestamp,
-              frameIndex: i,
-              prevBase64: prev?.base64,
-              prevTimestamp: prev?.timestamp,
-            };
-            try {
-              // Two passes in parallel — merge results for consistent event detection
-              const [res1, res2] = await Promise.all([
-                fetch("/api/analyze/frame", {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify(payload),
-                }),
-                fetch("/api/analyze/frame", {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify(payload),
-                }),
-              ]);
-
-              const [pass1, pass2] = await Promise.all([
-                res1.ok ? (res1.json() as Promise<FrameData>) : Promise.resolve(null),
-                res2.ok ? (res2.json() as Promise<FrameData>) : Promise.resolve(null),
-              ]);
-
-              if (!pass1 && !pass2) throw new Error("Both analysis passes failed");
-              const data =
-                pass1 && pass2
-                  ? mergeFrameResults(pass1, pass2)
-                  : (pass1 ?? pass2)!;
-
-              completed++;
-              setProgress(36 + Math.round((completed / rawFrames.length) * 50));
-              setStatusDetail(`Analysed ${completed} of ${rawFrames.length} frames…`);
-              return data;
-            } catch {
-              completed++;
-              setProgress(36 + Math.round((completed / rawFrames.length) * 50));
-              setStatusDetail(`Analysed ${completed} of ${rawFrames.length} frames…`);
-              return {
-                frameIndex: i,
-                timestamp: rawFrame.timestamp,
-                players: [],
-                events: [],
-                possession: "contested" as const,
-              } as FrameData;
-            }
-          })
+        const { frames: analyzedFrames, failed } = await analyzeFrames(
+          rawFrames,
+          (completed, failedFrames) => {
+            setProgress(36 + Math.round((completed / rawFrames.length) * 50));
+            setStatusDetail(
+              failedFrames > 0
+                ? `Analysed ${completed} of ${rawFrames.length} frames (${failedFrames} retried and skipped)…`
+                : `Analysed ${completed} of ${rawFrames.length} frames…`
+            );
+          }
         );
+
+        if (failed / rawFrames.length > MAX_FAILED_FRAME_RATIO) {
+          throw new Error(
+            `AI analysis failed for ${failed} of ${rawFrames.length} frames. Please try again with a shorter or clearer clip.`
+          );
+        }
 
         setStatus("summarizing");
         setStatusDetail("Building match insights…");
