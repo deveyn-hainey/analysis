@@ -68,6 +68,9 @@ export interface FrameData {
   possession: TeamId | "contested";
   // Player with closest contact to the ball — used for cross-frame pass counting
   possessingPlayer?: { team: TeamId; playerId: string };
+  // Match officials detected separately from players (currently only populated by
+  // the YOLO worker when the loaded model has a distinct referee class, e.g. soccana).
+  referees?: Position[];
 }
 
 export interface TeamStats {

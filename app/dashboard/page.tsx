@@ -320,7 +320,7 @@ function DashboardContent() {
                   </div>
                   {currentFrame && (
                     pitchView === "frame" && frameImage
-                      ? <FrameOverlay base64={frameImage} players={currentFrame.players} ballPosition={currentFrame.ballPosition} />
+                      ? <FrameOverlay base64={frameImage} players={currentFrame.players} ballPosition={currentFrame.ballPosition} referees={currentFrame.referees} />
                       : <SoccerField frame={currentFrame} />
                   )}
                   {pitchView === "frame" && !frameImage && (
@@ -469,7 +469,7 @@ function DashboardContent() {
                   </div>
                   {currentFrame && (
                     pitchView === "frame" && frameImage
-                      ? <FrameOverlay base64={frameImage} players={currentFrame.players} ballPosition={currentFrame.ballPosition} />
+                      ? <FrameOverlay base64={frameImage} players={currentFrame.players} ballPosition={currentFrame.ballPosition} referees={currentFrame.referees} />
                       : <SoccerField frame={currentFrame} />
                   )}
                   {pitchView === "frame" && !frameImage && (

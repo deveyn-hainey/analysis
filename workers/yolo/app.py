@@ -35,6 +35,10 @@ CONFIDENCE = float(os.getenv("YOLO_CONFIDENCE", "0.25"))
 # A missed ball starves almost every downstream candidate/event signal, so it gets its
 # own, more permissive threshold instead of sharing the player confidence cutoff.
 BALL_CONFIDENCE = float(os.getenv("YOLO_BALL_CONFIDENCE", "0.1"))
+# Inference resolution for the ultralytics backend. 1280 matches soccana's training
+# imgsz; override down for speed on CPU if a frame is already small, or up for even
+# tinier balls on high-res source video.
+IMAGE_SIZE = int(os.getenv("YOLO_IMGSZ", "1280"))
 PLAYER_CLASSES = {name.strip().lower() for name in os.getenv("YOLO_PLAYER_CLASSES", "person,player,goalkeeper").split(",")}
 BALL_CLASSES = {name.strip().lower() for name in os.getenv("YOLO_BALL_CLASSES", "sports ball,ball").split(",")}
 # NOTE: with the default COCO-pretrained model (yolo11n.pt) there is no "referee" class,
@@ -219,8 +223,16 @@ def detections_for_image(image: Image.Image) -> list[Detection]:
 
     # Run at the lower of the two floors so ball boxes below CONFIDENCE aren't
     # discarded by Ultralytics before we get a chance to apply the ball-specific
-    # threshold below.
-    result = model.predict(source=np.asarray(image), conf=min(CONFIDENCE, BALL_CONFIDENCE), verbose=False)[0]
+    # threshold below. imgsz matters a lot for ball recall: Ultralytics defaults to
+    # 640, but soccana was trained at 1280 — running inference at the architecture's
+    # default silently downscales the already-tiny ball further before the model
+    # ever sees it.
+    result = model.predict(
+        source=np.asarray(image),
+        conf=min(CONFIDENCE, BALL_CONFIDENCE),
+        imgsz=IMAGE_SIZE,
+        verbose=False,
+    )[0]
     names = result.names
     detections: list[Detection] = []
 
@@ -315,6 +327,7 @@ def analyze_precomputed_frame(
         if d.cls_name in PLAYER_CLASSES and d.cls_name not in REFEREE_CLASSES
     ]
     ball_detections = [d for d in detections if d.cls_name in BALL_CLASSES]
+    referee_detections = [d for d in detections if d.cls_name in REFEREE_CLASSES]
 
     players: list[dict[str, Any]] = []
     team_counts: dict[TeamId, int] = {"home": 0, "away": 0}
@@ -360,6 +373,9 @@ def analyze_precomputed_frame(
 
     if possessing_player:
         frame["possessingPlayer"] = possessing_player
+
+    if referee_detections:
+        frame["referees"] = [position_from_box(d.xyxy, width, height) for d in referee_detections]
 
     return frame
 

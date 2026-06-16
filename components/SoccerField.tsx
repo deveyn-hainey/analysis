@@ -70,6 +70,19 @@ export default function SoccerField({ frame }: SoccerFieldProps) {
         <path d={`M ${W - 8},8 A 16,16 0 0,0 ${W - 24},8`} fill="none" stroke="white" strokeWidth={1.5} opacity={0.5} />
         <path d={`M ${W - 8},${H - 8} A 16,16 0 0,1 ${W - 24},${H - 8}`} fill="none" stroke="white" strokeWidth={1.5} opacity={0.5} />
 
+        {/* Referees */}
+        {frame.referees?.map((pos, i) => (
+          <circle
+            key={`ref-${i}`}
+            cx={px(pos.x)}
+            cy={py(pos.y)}
+            r={9}
+            fill="#1a1a1a"
+            stroke="#fbbf24"
+            strokeWidth={2}
+          />
+        ))}
+
         {/* Ball */}
         {frame.ballPosition && (
           <g>
@@ -146,6 +159,12 @@ export default function SoccerField({ frame }: SoccerFieldProps) {
           <div className="w-3 h-3 rounded-full bg-white border-2 border-amber-500" />
           <span className="text-[#6b9e6b]">Ball</span>
         </div>
+        {frame.referees && frame.referees.length > 0 && (
+          <div className="flex items-center gap-1.5">
+            <div className="w-3 h-3 rounded-full bg-black border-2 border-yellow-400" />
+            <span className="text-[#6b9e6b]">Ref</span>
+          </div>
+        )}
       </div>
     </div>
   );

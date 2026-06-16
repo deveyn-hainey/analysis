@@ -28,7 +28,10 @@ const VISION_WORKER_URL = process.env.NEXT_PUBLIC_VISION_WORKER_URL?.replace(/\/
 type RawFrame = { base64: string; timestamp: number };
 
 function frameInterval(durationSeconds: number): number {
-  return Math.max(2, Math.min(8, Math.round(durationSeconds / 16)));
+  // Capped at 8s before, which could step right over an entire goal sequence
+  // (crossing the line + celebration + scoreboard update is often a 2-4s window)
+  // between two samples. Tighter cap trades more frames/cost for not missing it.
+  return Math.max(2, Math.min(4, Math.round(durationSeconds / 20)));
 }
 
 function extractFrames(
@@ -52,8 +55,13 @@ function extractFrames(
         timestamps.push(+t.toFixed(1));
       }
 
-      canvas.width = 640;
-      canvas.height = 360;
+      // 640×360 was throwing away exactly the resolution needed to see the ball:
+      // a ball that's ~15px wide in a 1920×1080 broadcast source shrinks to ~5px,
+      // well below what any detector (YOLO or Claude) can reliably pick out — and
+      // the soccana model was trained at 1280px besides. Every "ball not detected"
+      // review note traces back to this.
+      canvas.width = 1280;
+      canvas.height = 720;
 
       let idx = 0;
       const seekNext = () => {
@@ -65,8 +73,8 @@ function extractFrames(
       };
 
       video.onseeked = () => {
-        ctx.drawImage(video, 0, 0, 640, 360);
-        const base64 = canvas.toDataURL("image/jpeg", 0.7).split(",")[1];
+        ctx.drawImage(video, 0, 0, 1280, 720);
+        const base64 = canvas.toDataURL("image/jpeg", 0.85).split(",")[1];
         frames.push({ base64, timestamp: timestamps[idx] });
         onProgress?.(Math.round(((idx + 1) / timestamps.length) * 30));
         idx++;
