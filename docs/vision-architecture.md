@@ -11,6 +11,8 @@ The best next step is a two-layer pipeline:
 
 This keeps the app fast, reduces Claude cost, and makes overlays more accurate.
 
+The repository now includes a starter YOLO worker in `workers/yolo`. It is intentionally optional: run it locally for free, or deploy it to a CPU/GPU host later.
+
 ## Why Not Claude Only?
 
 Claude can describe sampled frames, but tactical overlays need consistent geometry and identity over time:
@@ -91,6 +93,19 @@ YOLO worker path:
 - Local Apple Silicon or consumer GPU: low/no per-video cost, usually much faster
 - Cloud GPU: pay for GPU runtime, but video analysis can be much faster and more accurate
 - Claude cost drops because only summaries and key candidate moments go to Claude
+
+Using only your current Claude API key:
+
+- Works today.
+- Costs only Claude usage.
+- Does not give true tracking accuracy.
+
+Using the local YOLO worker:
+
+- No additional paid API key.
+- No cloud bill if it runs on your computer.
+- First run may download YOLO weights.
+- Accuracy is limited until the generic model is replaced with soccer-trained weights.
 
 ## What To Set Up Next
 

@@ -40,13 +40,31 @@ Optional model overrides:
 ```
 ANTHROPIC_FRAME_MODEL=claude-sonnet-4-6
 ANTHROPIC_SUMMARY_MODEL=claude-sonnet-4-6
+NEXT_PUBLIC_VISION_WORKER_URL=http://localhost:8001
 ```
 
 Recommended defaults:
 
 - Keep `ANTHROPIC_FRAME_MODEL` on Sonnet while this app still relies on Claude for frame-level vision.
 - Use `ANTHROPIC_SUMMARY_MODEL` for the final coaching insight pass.
+- Set `NEXT_PUBLIC_VISION_WORKER_URL` only when running the optional YOLO worker.
 - Do not use Claude Batch API for the interactive upload path; batches are cheaper, but asynchronous and better suited to background re-analysis.
+
+### Optional YOLO worker
+
+For a free local computer-vision layer:
+
+```bash
+cd workers/yolo
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn app:app --host 0.0.0.0 --port 8001
+```
+
+Then run the web app with `NEXT_PUBLIC_VISION_WORKER_URL=http://localhost:8001`.
+
+This costs nothing beyond local compute/electricity. For deployment, the worker needs a CPU/GPU host; the Next/Vercel app itself should not run YOLO.
 
 ### 3. Run locally
 
@@ -90,6 +108,7 @@ app/
   api/analyze/summarize/route.ts
                         — Aggregates frame data, deduplicates events, generates insights
   api/analyze/route.ts  — Demo endpoint for precomputed sample data
+  workers/yolo/         — Optional local YOLO worker for free CV preprocessing
 
 components/
   SoccerField.tsx       — SVG field with animated player dots

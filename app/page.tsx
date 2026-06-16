@@ -23,6 +23,7 @@ const FRAME_ANALYSIS_CONCURRENCY = 4;
 const MAX_FRAME_RETRIES = 1;
 const MAX_FAILED_FRAME_RATIO = 0.3;
 const SEND_PREVIOUS_FRAME_CONTEXT = false;
+const VISION_WORKER_URL = process.env.NEXT_PUBLIC_VISION_WORKER_URL?.replace(/\/$/, "");
 
 type RawFrame = { base64: string; timestamp: number };
 
@@ -170,6 +171,30 @@ async function analyzeFrames(
   };
 }
 
+async function analyzeFramesWithWorker(rawFrames: RawFrame[]): Promise<FrameData[]> {
+  if (!VISION_WORKER_URL) {
+    throw new Error("Vision worker is not configured");
+  }
+
+  const res = await fetch(`${VISION_WORKER_URL}/analyze-frames`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ frames: rawFrames }),
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: "Vision worker analysis failed" }));
+    throw new Error((err as { error?: string }).error ?? "Vision worker analysis failed");
+  }
+
+  const data = (await res.json()) as { frames?: FrameData[] };
+  if (!data.frames || data.frames.length === 0) {
+    throw new Error("Vision worker returned no frames");
+  }
+
+  return data.frames;
+}
+
 export default function HomePage() {
   const router = useRouter();
   const [dragOver, setDragOver] = useState(false);
@@ -205,25 +230,59 @@ export default function HomePage() {
         rawFrames.forEach((f, i) => frameImageStore.set(i, f.base64));
 
         setStatus("analyzing");
-        setStatusDetail(`Analysing ${rawFrames.length} frames with AI…`);
+        setStatusDetail(
+          VISION_WORKER_URL
+            ? `Analysing ${rawFrames.length} frames with YOLO worker…`
+            : `Analysing ${rawFrames.length} frames with AI…`
+        );
         setProgress(36);
 
-        const { frames: analyzedFrames, failed } = await analyzeFrames(
-          rawFrames,
-          (completed, failedFrames) => {
-            setProgress(36 + Math.round((completed / rawFrames.length) * 50));
-            setStatusDetail(
-              failedFrames > 0
-                ? `Analysed ${completed} of ${rawFrames.length} frames (${failedFrames} retried and skipped)…`
-                : `Analysed ${completed} of ${rawFrames.length} frames…`
+        let analyzedFrames: FrameData[];
+        if (VISION_WORKER_URL) {
+          try {
+            analyzedFrames = await analyzeFramesWithWorker(rawFrames);
+            setProgress(86);
+            setStatusDetail(`YOLO worker analysed ${analyzedFrames.length} frames…`);
+          } catch {
+            setStatusDetail("YOLO worker unavailable; falling back to Claude frame analysis…");
+            const claudeResult = await analyzeFrames(
+              rawFrames,
+              (completed, failedFrames) => {
+                setProgress(36 + Math.round((completed / rawFrames.length) * 50));
+                setStatusDetail(
+                  failedFrames > 0
+                    ? `Analysed ${completed} of ${rawFrames.length} frames (${failedFrames} retried and skipped)…`
+                    : `Analysed ${completed} of ${rawFrames.length} frames…`
+                );
+              }
+            );
+
+            if (claudeResult.failed / rawFrames.length > MAX_FAILED_FRAME_RATIO) {
+              throw new Error(
+                `AI analysis failed for ${claudeResult.failed} of ${rawFrames.length} frames. Please try again with a shorter or clearer clip.`
+              );
+            }
+            analyzedFrames = claudeResult.frames;
+          }
+        } else {
+          const claudeResult = await analyzeFrames(
+            rawFrames,
+            (completed, failedFrames) => {
+              setProgress(36 + Math.round((completed / rawFrames.length) * 50));
+              setStatusDetail(
+                failedFrames > 0
+                  ? `Analysed ${completed} of ${rawFrames.length} frames (${failedFrames} retried and skipped)…`
+                  : `Analysed ${completed} of ${rawFrames.length} frames…`
+              );
+            }
+          );
+
+          if (claudeResult.failed / rawFrames.length > MAX_FAILED_FRAME_RATIO) {
+            throw new Error(
+              `AI analysis failed for ${claudeResult.failed} of ${rawFrames.length} frames. Please try again with a shorter or clearer clip.`
             );
           }
-        );
-
-        if (failed / rawFrames.length > MAX_FAILED_FRAME_RATIO) {
-          throw new Error(
-            `AI analysis failed for ${failed} of ${rawFrames.length} frames. Please try again with a shorter or clearer clip.`
-          );
+          analyzedFrames = claudeResult.frames;
         }
 
         setStatus("summarizing");
