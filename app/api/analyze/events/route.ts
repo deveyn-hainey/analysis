@@ -48,6 +48,70 @@ function cleanJson(text: string) {
   return trimmed;
 }
 
+// Closes unclosed strings, arrays, and objects left open by a token-limit truncation.
+// Does not fix unescaped quotes mid-string — those are rarer and harder to repair safely.
+function repairTruncatedJson(text: string): string {
+  let inString = false;
+  let escape = false;
+  const stack: string[] = [];
+
+  for (const c of text) {
+    if (escape) { escape = false; continue; }
+    if (c === "\\" && inString) { escape = true; continue; }
+    if (c === '"') { inString = !inString; continue; }
+    if (inString) continue;
+    if (c === "{") stack.push("}");
+    else if (c === "[") stack.push("]");
+    else if (c === "}" || c === "]") stack.pop();
+  }
+
+  let repaired = text.trimEnd();
+  if (inString) repaired += '"';
+  for (let i = stack.length - 1; i >= 0; i--) repaired += stack[i];
+  return repaired;
+}
+
+// Extracts whatever complete frame objects exist from a (possibly truncated) response.
+function recoverPartialFrames(text: string): RawFrameUpdate[] {
+  const cleaned = text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
+  const match = cleaned.match(/"frames"\s*:\s*\[/);
+  if (!match || match.index === undefined) return [];
+
+  const arrayStart = match.index + match[0].length;
+  const frames: RawFrameUpdate[] = [];
+  let i = arrayStart;
+
+  while (i < cleaned.length) {
+    while (i < cleaned.length && /[\s,]/.test(cleaned[i])) i++;
+    if (i >= cleaned.length || cleaned[i] === "]") break;
+    if (cleaned[i] !== "{") break;
+
+    let depth = 0;
+    let inStr = false;
+    let esc = false;
+    const start = i;
+
+    for (; i < cleaned.length; i++) {
+      const c = cleaned[i];
+      if (esc) { esc = false; continue; }
+      if (c === "\\" && inStr) { esc = true; continue; }
+      if (c === '"') { inStr = !inStr; continue; }
+      if (inStr) continue;
+      if (c === "{") depth++;
+      else if (c === "}") {
+        depth--;
+        if (depth === 0) {
+          try { frames.push(JSON.parse(cleaned.slice(start, i + 1)) as RawFrameUpdate); } catch { /* malformed object, skip */ }
+          i++;
+          break;
+        }
+      }
+    }
+  }
+
+  return frames;
+}
+
 function errorMessage(err: unknown) {
   if (err instanceof Error) return err.message;
   return String(err);
@@ -431,6 +495,39 @@ function candidateWindows(frames: FrameData[]) {
     }
 
     if (prev) {
+      // Celebration cluster: a sudden surge of players near either goal mouth is a
+      // strong indicator of a goal even when there's no scoreboard and YOLO never
+      // placed the ball in the net (common if the goal frame was not sampled or the
+      // ball was occluded). We flag it as a candidate so Claude can visually confirm.
+      const nearGoal = (p: { position: { x: number; y: number } }, side: "left" | "right") =>
+        (side === "left" ? p.position.x <= 22 : p.position.x >= 78) &&
+        p.position.y >= 28 && p.position.y <= 72;
+
+      for (const side of ["left", "right"] as const) {
+        const currCount = frame.players.filter((p) => nearGoal(p, side)).length;
+        const prevCount = prev.players.filter((p) => nearGoal(p, side)).length;
+        if (currCount >= 4 && currCount > prevCount + 1) {
+          candidates.push({
+            candidate_type: "possible_goal_celebration_cluster",
+            frameIndex: frame.frameIndex,
+            window,
+            signals: {
+              player_surge_near_goal: true,
+              side,
+              current_player_count_near_goal: currCount,
+              previous_player_count_near_goal: prevCount,
+              possession_team: frame.possession,
+              nearest_players: nearest,
+              instruction:
+                "Multiple players are suddenly clustered near this goal. Check the image for: ball in net, keeper retrieving ball, player celebrations (arms up, jumping, mobbing). If any are visible, report a goal event. If no celebration cues are present, report no event.",
+            },
+          });
+          break; // only one side per frame to avoid duplicates
+        }
+      }
+    }
+
+    if (prev) {
       const playerCountDelta = Math.abs(frame.players.length - prev.players.length);
       const centroid = frame.players.length
         ? {
@@ -570,6 +667,21 @@ function fallbackEventForCandidate(
     };
   }
 
+  if (candidate.candidate_type === "possible_goal_celebration_cluster") {
+    return {
+      frameIndex: frame.frameIndex,
+      timestamp: frame.timestamp,
+      type: "shot",
+      team,
+      description: "Unverified possible goal: players clustered near goal zone but no visual confirmation from Claude",
+      confidence: 0.4,
+      position: frame.ballPosition,
+      evidence_used: ["YOLO detected sudden player surge near goal area", "Claude event review was unavailable for this window"],
+      conflicts: ["could be a corner, free kick wall, or crowded box — not visually confirmed"],
+      pipeline_flag: "low_confidence",
+    };
+  }
+
   if (candidate.candidate_type === "possible_turnover_or_tackle") {
     return {
       frameIndex: frame.frameIndex,
@@ -700,8 +812,12 @@ Goal rules:
 - Do NOT emit a goal event yourself just because this frame's scoreboard shows a goal already happened — you only see this batch, not the whole clip, so you can't tell if that score is new or was already there before this batch started. Just report it accurately in the "scoreboard" field above; an increase is detected automatically by comparing your readings across the whole clip, including frames outside this batch.
 - Supporting signals: ball in goal zone, ball disappears in goalmouth, celebration cluster near goal, defending shape collapse.
 - Rejection signals: keeper catches/parries, ball visible wide/above goal, restart appears to be corner/goal kick, no score/restart evidence.
+- SCOREBOARD-FREE GOAL DETECTION: When no scoreboard is visible, rely on visual cues alone:
+  * If a "possible_goal_celebration_cluster" candidate is present, carefully scan the image for celebrating players (arms raised, jumping, mobbing, running together), ball in/near net, or goalkeeper dejection. These are sufficient to confirm a goal without a scoreboard.
+  * A clear celebration cluster (4+ players celebrating near a goal) combined with the attacking team in possession moments before is strong enough to confirm a goal at confidence 0.80–0.88.
+  * Absence of celebration in a "possible_goal_celebration_cluster" candidate means the cluster was likely a corner, free kick, or congested box — do not emit a goal.
 - Goal recall triggers include ball direction reversal near the box and possible camera cut/replay/angle change after an attacking moment. These triggers should cause verification, not automatic confirmation.
-- Never confirm a goal solely from celebration or pressure near the box.
+- Never confirm a goal solely from a scoreboard when you cannot see live action.
 - If ambiguous, label shot or no event with lower confidence rather than goal.
 - Replays and camera cuts are a known limitation. If a frame appears to be a replay or angle cut, add "replay_suspected" to pipeline_flag and do not count a fresh live event unless the timestamp window clearly shows live play.
 - If evidence conflicts, keep the event only when confidence remains justified and put the disagreement in conflicts. Use pipeline_flag "verifier_conflict" or "scoreboard_conflict" when appropriate.
@@ -766,16 +882,27 @@ async function reviewFrameBatch(
     try {
       const response = await client.messages.create({
         model: EVENT_MODEL,
-        // 1800 was tight for 8 images plus a growing candidate list and the rich
-        // per-event fields (evidence_used/conflicts/etc) — truncated JSON meant a
-        // parse failure, which silently dropped the whole batch to the heuristic
-        // fallback path instead of Claude's actual review.
-        max_tokens: 3000,
+        // Bumped from 3000: at ~3 chars/token, a batch with 8 frames and rich
+        // per-event fields (evidence_used/conflicts/etc) easily hits 3000 tokens,
+        // truncating the JSON and causing the parse error we log in the warning.
+        max_tokens: 5000,
         messages: [{ role: "user", content: buildReviewContent(images, compactFrames, batchCandidates) }],
       });
 
       const raw = response.content[0].type === "text" ? response.content[0].text : "{}";
-      return JSON.parse(cleanJson(raw)) as RawEventReview;
+
+      // Try clean parse → repaired parse → partial frame extraction
+      try {
+        return JSON.parse(cleanJson(raw)) as RawEventReview;
+      } catch {
+        try {
+          return JSON.parse(cleanJson(repairTruncatedJson(raw))) as RawEventReview;
+        } catch {
+          const recovered = recoverPartialFrames(raw);
+          if (recovered.length > 0) return { frames: recovered };
+          throw new Error("JSON parse failed after repair and partial recovery");
+        }
+      }
     } catch (err) {
       lastError = err;
       if (attempt < EVENT_REVIEW_MAX_ATTEMPTS) {
@@ -831,8 +958,22 @@ export async function POST(req: NextRequest) {
       frames: [...fallbackUpdates, ...reviewedUpdates],
     });
     const framesWithScoreboardGoals = synthesizeGoalsFromScoreboard(reviewedFrames);
+
+    // If any frame in this batch has a readable scoreboard, it is the ground truth.
+    // Strip visually-detected goal events so they don't double-count alongside the
+    // scoreboard-synthesized ones. When no scoreboard is present, keep visual goals.
+    const hasScoreboard = framesWithScoreboardGoals.some((f) => f.scoreboard != null);
+    const finalFrames = hasScoreboard
+      ? framesWithScoreboardGoals.map((f) => ({
+          ...f,
+          events: f.events.filter(
+            (e) => e.type !== "goal" || e.id.includes("-scoreboard-goal-")
+          ),
+        }))
+      : framesWithScoreboardGoals;
+
     return NextResponse.json({
-      frames: synthesizeMovementEvents(framesWithScoreboardGoals),
+      frames: synthesizeMovementEvents(finalFrames),
       warnings: reviewWarnings,
     });
   } catch (err) {

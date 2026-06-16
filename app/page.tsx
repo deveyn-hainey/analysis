@@ -14,7 +14,7 @@ import {
   Cpu,
   BarChart3,
 } from "lucide-react";
-import type { AnalyzeEventsRequest, AnalyzeFrameRequest, FrameData, MatchAnalysis } from "@/lib/types";
+import type { AnalyzeEventsRequest, AnalyzeFrameRequest, FrameData, MatchAnalysis, MatchEvent } from "@/lib/types";
 import { videoStore } from "@/lib/videoStore";
 import { frameImageStore } from "@/lib/frameImageStore";
 
@@ -24,6 +24,11 @@ const MAX_FRAME_RETRIES = 1;
 const MAX_FAILED_FRAME_RATIO = 0.3;
 const SEND_PREVIOUS_FRAME_CONTEXT = false;
 const VISION_WORKER_URL = process.env.NEXT_PUBLIC_VISION_WORKER_URL?.replace(/\/$/, "");
+// Frames per /api/analyze/events request. Matches the server-side batch size so
+// each client request maps to exactly one Claude call on the server side.
+const EVENT_REVIEW_CLIENT_BATCH = 8;
+// Two concurrent event-review requests roughly halves wall-clock time vs sequential.
+const EVENT_REVIEW_CLIENT_CONCURRENCY = 2;
 
 type RawFrame = { base64: string; timestamp: number };
 
@@ -203,32 +208,159 @@ async function analyzeFramesWithWorker(rawFrames: RawFrame[]): Promise<FrameData
   return data.frames;
 }
 
+// Sends scoreboard reads across every frame and synthesises goal events wherever
+// the score increased — matches the server-side logic so cross-batch goals are
+// caught after all client batches have been merged.
+function synthesizeGoalsFromScoreboard(frames: FrameData[]): FrameData[] {
+  const sorted = [...frames].sort((a, b) => a.timestamp - b.timestamp);
+  const runningMax: Record<string, number> = { home: 0, away: 0 };
+  const additions = new Map<number, MatchEvent[]>();
+
+  for (const frame of sorted) {
+    if (!frame.scoreboard) continue;
+    for (const team of ["home", "away"] as const) {
+      const seen = frame.scoreboard![team];
+      if (typeof seen === "number" && Number.isFinite(seen) && seen > runningMax[team]) {
+        const ev: MatchEvent = {
+          id: `f${frame.frameIndex}-scoreboard-goal-${team}-${seen}`,
+          timestamp: frame.timestamp,
+          type: "goal",
+          team,
+          description: `Scoreboard read ${frame.scoreboard!.home}-${frame.scoreboard!.away} — ${team === "home" ? "Home" : "Away"} goal confirmed from score overlay`,
+          confidence: 0.92,
+          isKeyMoment: true,
+          evidenceUsed: [`scoreboard read ${seen} for ${team}, up from ${runningMax[team]} previously observed`],
+        };
+        additions.set(frame.frameIndex, [...(additions.get(frame.frameIndex) ?? []), ev]);
+        runningMax[team] = seen;
+      }
+    }
+  }
+
+  if (additions.size === 0) return frames;
+  return frames.map((f) =>
+    additions.has(f.frameIndex)
+      ? { ...f, events: deduplicateEvents([...f.events, ...additions.get(f.frameIndex)!]) }
+      : f
+  );
+}
+
+function deduplicateEvents(events: MatchEvent[]): MatchEvent[] {
+  const seen = new Set<string>();
+  return events.filter((e) => {
+    if (seen.has(e.id)) return false;
+    seen.add(e.id);
+    return true;
+  });
+}
+
+// When a scoreboard is readable anywhere in the clip, it is the ground truth for
+// goals. Visual/cluster-based goal detections are kept only when there is no
+// scoreboard at all — otherwise they double-count (one from Claude review, one from
+// scoreboard synthesis) and inflate the score.
+function preferScoreboardGoals(frames: FrameData[]): FrameData[] {
+  const hasScoreboard = frames.some((f) => f.scoreboard != null);
+  if (!hasScoreboard) return frames; // no scoreboard anywhere — keep visual goals as-is
+
+  return frames.map((f) => ({
+    ...f,
+    events: f.events.filter(
+      (e) => e.type !== "goal" || e.id.includes("-scoreboard-goal-")
+    ),
+  }));
+}
+
+// Resize frames to a smaller resolution for event review. Claude doesn't need
+// full 1280×720 to detect celebrations, ball-in-net, or player actions — and
+// sending half-resolution images cuts Claude payload size by ~60%.
+function resizeFramesForReview(
+  frames: RawFrame[],
+  width = 960,
+  height = 540,
+  quality = 0.78
+): Promise<RawFrame[]> {
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d")!;
+
+  return Promise.all(
+    frames.map(
+      (f) =>
+        new Promise<RawFrame>((resolve) => {
+          const img = new Image();
+          img.onload = () => {
+            ctx.drawImage(img, 0, 0, width, height);
+            resolve({
+              base64: canvas.toDataURL("image/jpeg", quality).split(",")[1],
+              timestamp: f.timestamp,
+            });
+          };
+          img.src = `data:image/jpeg;base64,${f.base64}`;
+        })
+    )
+  );
+}
+
 async function reviewEventsWithClaude(
   rawFrames: RawFrame[],
-  frames: FrameData[]
+  frames: FrameData[],
+  onProgress?: (completed: number, total: number) => void
 ): Promise<{ frames: FrameData[]; warnings: string[] }> {
-  const payload: AnalyzeEventsRequest = {
-    images: rawFrames,
-    frames,
-  };
+  // Downscale images before sending — Claude needs enough detail to see
+  // celebrations and ball-in-net, but not full 1280×720 YOLO resolution.
+  // 960×540 at 0.78 quality cuts payload ~60% and speeds up each API call.
+  const reviewImages = await resizeFramesForReview(rawFrames);
 
-  const res = await fetch("/api/analyze/events", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
+  const totalBatches = Math.ceil(reviewImages.length / EVENT_REVIEW_CLIENT_BATCH);
+  const allWarnings: string[] = [];
+  const resultFrames: FrameData[] = [...frames];
+  let nextBatch = 0;
 
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: "Event review failed" }));
-    throw new Error((err as { error?: string }).error ?? "Event review failed");
+  async function worker() {
+    while (nextBatch < totalBatches) {
+      const batchIdx = nextBatch++;
+      const start = batchIdx * EVENT_REVIEW_CLIENT_BATCH;
+      const batchImages = reviewImages.slice(start, start + EVENT_REVIEW_CLIENT_BATCH);
+      const batchFrames = frames.slice(start, start + EVENT_REVIEW_CLIENT_BATCH);
+
+      const payload: AnalyzeEventsRequest = { images: batchImages, frames: batchFrames };
+
+      try {
+        const res = await fetch("/api/analyze/events", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+
+        if (res.ok) {
+          const data = (await res.json()) as { frames?: FrameData[]; warnings?: string[] };
+          if (data.frames) {
+            data.frames.forEach((frame, i) => { resultFrames[start + i] = frame; });
+          }
+          if (data.warnings) allWarnings.push(...data.warnings);
+        } else {
+          const err = await res.json().catch(() => ({ error: "Event review failed" }));
+          allWarnings.push(`Batch ${batchIdx + 1}/${totalBatches} failed: ${(err as { error?: string }).error ?? "unknown error"}`);
+        }
+      } catch (err) {
+        allWarnings.push(`Batch ${batchIdx + 1}/${totalBatches} failed: ${err instanceof Error ? err.message : "unknown"}`);
+      }
+
+      onProgress?.(batchIdx + 1, totalBatches);
+    }
   }
 
-  const data = (await res.json()) as { frames?: FrameData[]; warnings?: string[] };
-  if (!data.frames || data.frames.length === 0) {
-    throw new Error("Event review returned no frames");
-  }
+  const concurrency = Math.min(EVENT_REVIEW_CLIENT_CONCURRENCY, totalBatches);
+  await Promise.all(Array.from({ length: concurrency }, () => worker()));
 
-  return { frames: data.frames, warnings: data.warnings ?? [] };
+  // Global scoreboard synthesis across all merged frames catches cross-batch goals
+  // (e.g. goal happened in batch 1 frames but scoreboard only visible in batch 2).
+  const withScoreboardGoals = synthesizeGoalsFromScoreboard(resultFrames);
+
+  // If a scoreboard was readable anywhere, it is the ground truth — remove visual
+  // goal events so they don't double-count alongside scoreboard-synthesized ones.
+  return { frames: preferScoreboardGoals(withScoreboardGoals), warnings: allWarnings };
 }
 
 export default function HomePage() {
@@ -280,11 +412,19 @@ export default function HomePage() {
             analyzedFrames = await analyzeFramesWithWorker(rawFrames);
             setProgress(72);
             setStatusDetail("Reviewing YOLO detections for match events…");
-            const reviewed = await reviewEventsWithClaude(rawFrames, analyzedFrames);
+            const totalBatches = Math.ceil(rawFrames.length / EVENT_REVIEW_CLIENT_BATCH);
+            const reviewed = await reviewEventsWithClaude(
+              rawFrames,
+              analyzedFrames,
+              (completed, total) => {
+                setProgress(72 + Math.round((completed / total) * 14));
+                setStatusDetail(`Reviewing events: batch ${completed}/${total}…`);
+              }
+            );
             analyzedFrames = reviewed.frames;
             eventReviewWarnings = reviewed.warnings;
             setProgress(86);
-            setStatusDetail(`Reviewed ${analyzedFrames.length} frames for events…`);
+            setStatusDetail(`Reviewed ${analyzedFrames.length} frames across ${totalBatches} batches…`);
           } catch (err) {
             const detail = err instanceof Error ? err.message : "Unknown worker error";
             throw new Error(
