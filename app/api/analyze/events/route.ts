@@ -5,7 +5,7 @@ import type { AnalyzeEventsRequest, FrameData, MatchEvent, TeamId } from "@/lib/
 const EVENT_MODEL = process.env.ANTHROPIC_EVENT_MODEL ?? process.env.ANTHROPIC_SUMMARY_MODEL ?? "claude-sonnet-4-6";
 const EVENT_REVIEW_BATCH_SIZE = 8;
 const EVENT_REVIEW_MAX_ATTEMPTS = 2;
-const MAX_CANDIDATE_WINDOWS = 28;
+const MAX_CANDIDATE_WINDOWS = 40;
 const DRIBBLE_DISTANCE_THRESHOLD = 6;
 const PASS_DISTANCE_THRESHOLD = 16;
 
@@ -185,6 +185,7 @@ function synthesizeMovementEvents(frames: FrameData[]): FrameData[] {
           position: frame.ballPosition,
           evidenceUsed: [`ball moved ${distance.toFixed(1)} pitch units while possession stayed ${frame.possession}`],
           conflicts: ["synthetic event from tracking, not visually verified by Claude"],
+          pipelineFlag: "low_confidence",
         };
         if (!existing.has(eventKey(event))) additions.push(event);
       }
@@ -203,6 +204,7 @@ function synthesizeMovementEvents(frames: FrameData[]): FrameData[] {
           semanticLabel: "high_press_turnover",
           evidenceUsed: [`possession changed from ${prev.possession} to ${frame.possession}`],
           conflicts: ["classified as tackle/turnover from tracking signal"],
+          pipelineFlag: "low_confidence",
         };
         if (!existing.has(eventKey(event))) additions.push(event);
       }
@@ -251,7 +253,10 @@ function candidateWindows(frames: FrameData[]) {
     };
 
     if (ball) {
-      const inGoalZone = ball.x <= 8 || ball.x >= 92;
+      // Goal-mouth width only — without a y-bound this fired for every ordinary
+      // byline touch (including corners), eating most of the candidate budget
+      // with "possible goal" noise instead of routine play.
+      const inGoalZone = (ball.x <= 8 || ball.x >= 92) && ball.y >= 32 && ball.y <= 68;
       const inShotZone = ball.x <= 22 || ball.x >= 78;
       const nearCorner = (ball.x <= 10 || ball.x >= 90) && (ball.y <= 12 || ball.y >= 88);
       const nearestOpponent = nearest.find((player) =>
@@ -372,7 +377,7 @@ function candidateWindows(frames: FrameData[]) {
           ball_detected: false,
           yolo_player_count: frame.players.length,
           yolo_possession_estimate: frame.possession,
-          instruction: "Use the image to correct possession and label only obvious high-value events.",
+          instruction: "Use the image to correct possession. Still report routine passes/dribbles/challenges you can see even without a YOLO ball position — prefer a lower-confidence event over no event.",
         },
       });
     }
@@ -495,6 +500,24 @@ function fallbackEventForCandidate(
       position: frame.ballPosition,
       evidence_used: ["YOLO detected nearby opponents around the ball", "Claude event review may not have confirmed this window"],
       conflicts: ["could be pressure, tackle attempt, or normal marking"],
+      pipeline_flag: "low_confidence",
+    };
+  }
+
+  // YOLO frequently misses the ball in wide broadcast shots (small, fast-moving object
+  // on a generic, non-soccer-trained model). Without this case, those frames produced
+  // no fallback at all when Claude's review batch failed — a major source of the
+  // "no events" feeling, since ball-not-detected candidates are common.
+  if (candidate.candidate_type === "possible_open_play_ball_not_detected" && team) {
+    return {
+      frameIndex: frame.frameIndex,
+      timestamp: frame.timestamp,
+      type: "dribble",
+      team,
+      description: "Unverified ball-progression candidate; YOLO did not detect the ball this frame",
+      confidence: 0.3,
+      evidence_used: ["YOLO possession estimate from nearest players, ball position missing", "Claude event review was unavailable for this window"],
+      conflicts: ["ball position not detected by YOLO", "not confirmed by Claude vision review"],
       pipeline_flag: "low_confidence",
     };
   }
@@ -685,7 +708,11 @@ async function reviewFrameBatch(
     try {
       const response = await client.messages.create({
         model: EVENT_MODEL,
-        max_tokens: 1800,
+        // 1800 was tight for 8 images plus a growing candidate list and the rich
+        // per-event fields (evidence_used/conflicts/etc) — truncated JSON meant a
+        // parse failure, which silently dropped the whole batch to the heuristic
+        // fallback path instead of Claude's actual review.
+        max_tokens: 3000,
         messages: [{ role: "user", content: buildReviewContent(images, compactFrames, batchCandidates) }],
       });
 

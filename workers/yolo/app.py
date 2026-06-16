@@ -18,8 +18,17 @@ from ultralytics import YOLO
 MODEL_PATH = os.getenv("YOLO_MODEL_PATH", "yolo11n.pt")
 MODEL_BACKEND = os.getenv("YOLO_BACKEND", "auto").lower()
 CONFIDENCE = float(os.getenv("YOLO_CONFIDENCE", "0.25"))
+# The ball is a small, fast-moving object in wide broadcast shots, and the default
+# generic (non-soccer-trained) model misses it far more often than it misses players.
+# A missed ball starves almost every downstream candidate/event signal, so it gets its
+# own, more permissive threshold instead of sharing the player confidence cutoff.
+BALL_CONFIDENCE = float(os.getenv("YOLO_BALL_CONFIDENCE", "0.1"))
 PLAYER_CLASSES = {name.strip().lower() for name in os.getenv("YOLO_PLAYER_CLASSES", "person,player,goalkeeper").split(",")}
 BALL_CLASSES = {name.strip().lower() for name in os.getenv("YOLO_BALL_CLASSES", "sports ball,ball").split(",")}
+# NOTE: with the default COCO-pretrained model (yolo11n.pt) there is no "referee" class,
+# so this filter is a no-op until YOLO_MODEL_PATH points at a soccer-fine-tuned model
+# that actually emits one (see docs/vision-architecture.md). Referees currently fall
+# into PLAYER_CLASSES as plain "person" detections and get fed into team clustering.
 REFEREE_CLASSES = {name.strip().lower() for name in os.getenv("YOLO_REFEREE_CLASSES", "referee").split(",")}
 
 app = FastAPI(title="SoccerVision YOLO Worker")
@@ -43,7 +52,7 @@ if use_huggingface_yolov5():
     import yolov5
 
     model = yolov5.load(MODEL_PATH)
-    model.conf = CONFIDENCE
+    model.conf = min(CONFIDENCE, BALL_CONFIDENCE)
 else:
     model = YOLO(MODEL_PATH)
 
@@ -124,6 +133,14 @@ def player_role(position: dict[str, float], team: TeamId) -> str:
     return "fwd"
 
 
+def passes_confidence(cls_name: str, confidence: float) -> bool:
+    # Ball detections get the lower BALL_CONFIDENCE floor; everything else (mainly
+    # players) still needs the stricter CONFIDENCE floor to avoid flooding team
+    # clustering with low-quality boxes.
+    threshold = BALL_CONFIDENCE if cls_name in BALL_CLASSES else CONFIDENCE
+    return confidence >= threshold
+
+
 def detections_for_image(image: Image.Image) -> list[Detection]:
     if use_huggingface_yolov5():
         result = model(image, size=960)
@@ -132,6 +149,8 @@ def detections_for_image(image: Image.Image) -> list[Detection]:
         for prediction in result.pred[0]:
             x1, y1, x2, y2, confidence, cls_id = prediction.tolist()
             cls_name = str(names[int(cls_id)]).lower()
+            if not passes_confidence(cls_name, float(confidence)):
+                continue
             detections.append(
                 Detection(
                     cls_name=cls_name,
@@ -141,17 +160,23 @@ def detections_for_image(image: Image.Image) -> list[Detection]:
             )
         return detections
 
-    result = model.predict(source=np.asarray(image), conf=CONFIDENCE, verbose=False)[0]
+    # Run at the lower of the two floors so ball boxes below CONFIDENCE aren't
+    # discarded by Ultralytics before we get a chance to apply the ball-specific
+    # threshold below.
+    result = model.predict(source=np.asarray(image), conf=min(CONFIDENCE, BALL_CONFIDENCE), verbose=False)[0]
     names = result.names
     detections: list[Detection] = []
 
     for box in result.boxes:
         cls_id = int(box.cls[0])
         cls_name = str(names.get(cls_id, cls_id)).lower()
+        confidence = float(box.conf[0])
+        if not passes_confidence(cls_name, confidence):
+            continue
         detections.append(
             Detection(
                 cls_name=cls_name,
-                confidence=float(box.conf[0]),
+                confidence=confidence,
                 xyxy=tuple(float(v) for v in box.xyxy[0].tolist()),
             )
         )
@@ -289,27 +314,23 @@ def health() -> dict[str, str]:
 
 @app.post("/analyze-frames")
 def analyze_frames(request: AnalyzeFramesRequest) -> dict[str, Any]:
-    decoded: list[tuple[RawFrame, Image.Image, list[Detection], list[Detection]]] = []
-    all_colors: list[np.ndarray] = []
-
-    for frame in request.frames:
-        image = decode_frame(frame.base64)
+    # Team color clustering runs per frame rather than pooled across the whole clip.
+    # Pooling let a single noisy frame (lighting drift, a referee's kit color getting
+    # swept into PLAYER_CLASSES, a frame with few visible players) shift the brightness
+    # split for every frame in the match. Each broadcast frame has enough players from
+    # both teams to cluster reliably on its own, and a bad frame then only costs that
+    # one frame instead of corrupting team assignment for the whole video.
+    frames = []
+    for i, raw_frame in enumerate(request.frames):
+        image = decode_frame(raw_frame.base64)
         detections = detections_for_image(image)
         person_detections = [
             d for d in detections
             if d.cls_name in PLAYER_CLASSES and d.cls_name not in REFEREE_CLASSES
         ]
         colors = [crop_mean_color(image, d.xyxy) for d in person_detections]
-        all_colors.extend(colors)
-        decoded.append((frame, image, detections, person_detections))
-
-    all_teams = split_teams(all_colors)
-    cursor = 0
-    frames = []
-    for i, (frame, image, detections, person_detections) in enumerate(decoded):
-        teams = all_teams[cursor:cursor + len(person_detections)]
-        cursor += len(person_detections)
-        frames.append(analyze_precomputed_frame(frame, i, image, detections, teams))
+        teams = split_teams(colors)
+        frames.append(analyze_precomputed_frame(raw_frame, i, image, detections, teams))
 
     return {
         "processingMethod": "yolo-worker",

@@ -44,8 +44,17 @@ function buildHeatmap(teamId: TeamId, frames: FrameData[]): number[][] {
   return grid.map((row) => row.map((v) => +(v / max).toFixed(2)));
 }
 
+// Events created without Claude vision confirmation (YOLO-only fallback candidates,
+// or movement-synthesized pass/dribble/tackle events) are flagged "low_confidence".
+// They're worth surfacing in eventConflicts/keyEvents for coach review, but counting
+// them toward team stats and feeding them to the insights prompt silently corrupts
+// possession/passes/shots whenever a Claude review batch fails or is skipped.
+function isVerifiedEvent(event: MatchEvent) {
+  return event.pipelineFlag !== "low_confidence";
+}
+
 function countEventType(events: MatchEvent[], type: string, team?: TeamId) {
-  return events.filter((e) => e.type === type && (!team || e.team === team)).length;
+  return events.filter((e) => e.type === type && (!team || e.team === team) && isVerifiedEvent(e)).length;
 }
 
 function duplicateWindowSeconds(type: MatchEvent["type"]) {
