@@ -3,6 +3,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import type { AnalyzeEventsRequest, FrameData, MatchEvent, TeamId } from "@/lib/types";
 
 const EVENT_MODEL = process.env.ANTHROPIC_EVENT_MODEL ?? process.env.ANTHROPIC_SUMMARY_MODEL ?? "claude-sonnet-4-6";
+const EVENT_REVIEW_BATCH_SIZE = 8;
 
 interface RawEvent {
   frameIndex: number;
@@ -28,8 +29,17 @@ interface RawEventReview {
   frames?: RawFrameUpdate[];
 }
 
+type ImageBlock = { type: "image"; source: { type: "base64"; media_type: "image/jpeg"; data: string } };
+type TextBlock = { type: "text"; text: string };
+type ReviewContentBlock = ImageBlock | TextBlock;
+
 function cleanJson(text: string) {
   return text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
+}
+
+function errorMessage(err: unknown) {
+  if (err instanceof Error) return err.message;
+  return String(err);
 }
 
 function eventId(frameIndex: number, eventIndex: number, type: string, timestamp: number) {
@@ -349,37 +359,15 @@ function candidateWindows(frames: FrameData[]) {
   return candidates.slice(0, 12);
 }
 
-export async function POST(req: NextRequest) {
-  try {
-    const apiKey = process.env.ANTHROPIC_API_KEY;
-    if (!apiKey) {
-      return NextResponse.json({ error: "ANTHROPIC_API_KEY not configured." }, { status: 500 });
-    }
-
-    const body = (await req.json()) as AnalyzeEventsRequest;
-    const { frames, images } = body;
-    if (!frames?.length || !images?.length) {
-      return NextResponse.json({ error: "Frames and images are required." }, { status: 400 });
-    }
-
-    const compactFrames = frames.map((frame) => ({
-      frameIndex: frame.frameIndex,
-      timestamp: frame.timestamp,
-      possession: frame.possession,
-      ballPosition: frame.ballPosition,
-      playerCount: frame.players.length,
-      homePlayers: frame.players.filter((p) => p.team === "home").length,
-      awayPlayers: frame.players.filter((p) => p.team === "away").length,
-      playersNearBall: nearestPlayers(frame),
-    }));
-    const candidates = candidateWindows(frames);
-
-    type ImageBlock = { type: "image"; source: { type: "base64"; media_type: "image/jpeg"; data: string } };
-    type TextBlock = { type: "text"; text: string };
-    const content: Array<ImageBlock | TextBlock> = [
-      {
-        type: "text",
-        text: `You are a soccer match analysis verifier for fixed wide-angle tactical camera footage.
+function buildReviewContent(
+  images: AnalyzeEventsRequest["images"],
+  compactFrames: Array<Record<string, unknown>>,
+  candidates: ReturnType<typeof candidateWindows>
+): ReviewContentBlock[] {
+  const content: ReviewContentBlock[] = [
+    {
+      type: "text",
+      text: `You are a soccer match analysis verifier for fixed wide-angle tactical camera footage.
 You operate as a SPARSE VERIFIER and SEMANTIC LABELER only.
 
 Upstream already ran:
@@ -455,37 +443,96 @@ ${JSON.stringify(compactFrames)}
 
 Candidate windows:
 ${JSON.stringify(candidates)}`,
-      },
-    ];
+    },
+  ];
 
-    for (const image of images.slice(0, frames.length)) {
-      content.push({
-        type: "image",
-        source: {
-          type: "base64",
-          media_type: "image/jpeg",
-          data: image.base64,
-        },
-      });
-      content.push({
-        type: "text",
-        text: `Frame timestamp: ${image.timestamp.toFixed(1)}s`,
-      });
+  for (const image of images) {
+    content.push({
+      type: "image",
+      source: {
+        type: "base64",
+        media_type: "image/jpeg",
+        data: image.base64,
+      },
+    });
+    content.push({
+      type: "text",
+      text: `Frame timestamp: ${image.timestamp.toFixed(1)}s`,
+    });
+  }
+
+  return content;
+}
+
+async function reviewFrameBatch(
+  client: Anthropic,
+  images: AnalyzeEventsRequest["images"],
+  frames: FrameData[],
+  candidates: ReturnType<typeof candidateWindows>
+): Promise<RawEventReview> {
+  const frameIndexes = new Set(frames.map((frame) => frame.frameIndex));
+  const compactFrames = frames.map((frame) => ({
+    frameIndex: frame.frameIndex,
+    timestamp: frame.timestamp,
+    possession: frame.possession,
+    ballPosition: frame.ballPosition,
+    playerCount: frame.players.length,
+    homePlayers: frame.players.filter((p) => p.team === "home").length,
+    awayPlayers: frame.players.filter((p) => p.team === "away").length,
+    playersNearBall: nearestPlayers(frame),
+  }));
+  const batchCandidates = candidates.filter((candidate) =>
+    frameIndexes.has(candidate.frameIndex)
+  );
+
+  const response = await client.messages.create({
+    model: EVENT_MODEL,
+    max_tokens: 1800,
+    messages: [{ role: "user", content: buildReviewContent(images, compactFrames, batchCandidates) }],
+  });
+
+  const raw = response.content[0].type === "text" ? response.content[0].text : "{}";
+  return JSON.parse(cleanJson(raw)) as RawEventReview;
+}
+
+export async function POST(req: NextRequest) {
+  try {
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) {
+      return NextResponse.json({ error: "ANTHROPIC_API_KEY not configured." }, { status: 500 });
     }
 
-    const client = new Anthropic({ apiKey });
-    const response = await client.messages.create({
-      model: EVENT_MODEL,
-      max_tokens: 3500,
-      messages: [{ role: "user", content }],
-    });
+    const body = (await req.json()) as AnalyzeEventsRequest;
+    const { frames, images } = body;
+    if (!frames?.length || !images?.length) {
+      return NextResponse.json({ error: "Frames and images are required." }, { status: 400 });
+    }
 
-    const raw = response.content[0].type === "text" ? response.content[0].text : "{}";
-    const parsed = JSON.parse(cleanJson(raw)) as RawEventReview;
-    const reviewedFrames = mergeReviewedFrames(frames, parsed);
-    return NextResponse.json({ frames: synthesizeMovementEvents(reviewedFrames) });
+    const candidates = candidateWindows(frames);
+    const client = new Anthropic({ apiKey });
+    const reviewedUpdates: RawFrameUpdate[] = [];
+    const reviewWarnings: string[] = [];
+
+    for (let start = 0; start < frames.length; start += EVENT_REVIEW_BATCH_SIZE) {
+      const batchFrames = frames.slice(start, start + EVENT_REVIEW_BATCH_SIZE);
+      const batchImages = images.slice(start, start + EVENT_REVIEW_BATCH_SIZE);
+      try {
+        const review = await reviewFrameBatch(client, batchImages, batchFrames, candidates);
+        reviewedUpdates.push(...(review.frames ?? []));
+      } catch (err) {
+        const warning = `Claude event review skipped for frames ${batchFrames[0]?.frameIndex}-${batchFrames.at(-1)?.frameIndex}: ${errorMessage(err)}`;
+        console.error("[/api/analyze/events] batch failed", warning);
+        reviewWarnings.push(warning);
+      }
+    }
+
+    const reviewedFrames = mergeReviewedFrames(frames, { frames: reviewedUpdates });
+    return NextResponse.json({
+      frames: synthesizeMovementEvents(reviewedFrames),
+      warnings: reviewWarnings,
+    });
   } catch (err) {
     console.error("[/api/analyze/events]", err);
-    return NextResponse.json({ error: "Event review failed." }, { status: 500 });
+    return NextResponse.json({ error: `Event review failed: ${errorMessage(err)}` }, { status: 500 });
   }
 }
