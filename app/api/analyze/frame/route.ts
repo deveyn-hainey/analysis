@@ -23,11 +23,13 @@ Return ONLY valid JSON — no markdown, no code fences:
 Scan every corner and edge of the image for score overlays, tickers, or graphics.
 Common broadcast placements: top-left, top-right, bottom strip.
 Look for: "1-0", "2-1", team abbreviations with numbers, half-time scores.
-If ANY score is visible:
-  - Emit a "goal" event per goal shown (not just the change — total goals scored)
-  - description: "Scoreboard reads [score]"
-  - confidence: 0.98
-  - team: whichever team has the higher score, or the team that just scored
+Use the scoreboard only as supporting context. Do NOT emit a "goal" event solely
+because a score overlay is visible; that score may describe an earlier goal.
+Only emit a scoreboard-based "goal" if the previous frame had a lower score or
+the current frame also shows clear live goal cues. In that case:
+  - description: "Scoreboard changed to [score]" or describe the live goal cue
+  - confidence: 0.9+
+  - team: the team that just scored
 
 ── STEP 2: GOAL VISUAL CUES ──
 Even without a scoreboard, report "goal" if you see:
@@ -35,6 +37,7 @@ Even without a scoreboard, report "goal" if you see:
 - Multiple attacking players celebrating (arms up, jumping, running together)
 - Goalkeeper on ground looking dejected or retrieving ball from net
 - Players mobbing one player in a huddle near the goal
+Do not report a goal for ordinary attacking pressure near the penalty area.
 
 ── STEP 3: MOTION CONTEXT (if a previous frame was provided) ──
 Compare positions between the two frames to detect:

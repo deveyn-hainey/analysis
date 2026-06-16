@@ -355,6 +355,13 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(SAMPLE_ANALYSIS);
     }
 
+    if (!body.demo) {
+      return NextResponse.json(
+        { error: "Use /api/analyze/frame followed by /api/analyze/summarize for AI analysis." },
+        { status: 410 }
+      );
+    }
+
     const apiKey = process.env.ANTHROPIC_API_KEY;
     if (!apiKey) {
       return NextResponse.json(
