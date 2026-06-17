@@ -377,7 +377,7 @@ async function fetchDenseTracking(file: File): Promise<void> {
   try {
     const form = new FormData();
     form.append("file", file);
-    form.append("fps", "5");
+    form.append("fps", "15");
     const res = await fetch(`${VISION_WORKER_URL}/analyze-video`, {
       method: "POST",
       body: form,

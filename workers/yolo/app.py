@@ -48,6 +48,9 @@ BALL_CLASSES = {name.strip().lower() for name in os.getenv("YOLO_BALL_CLASSES", 
 # that actually emits one (see docs/vision-architecture.md). Referees currently fall
 # into PLAYER_CLASSES as plain "person" detections and get fed into team clustering.
 REFEREE_CLASSES = {name.strip().lower() for name in os.getenv("YOLO_REFEREE_CLASSES", "referee").split(",")}
+DEFAULT_DENSE_FPS = float(os.getenv("YOLO_DENSE_FPS", "15"))
+TRACK_SMOOTHING_ALPHA = float(os.getenv("YOLO_TRACK_SMOOTHING_ALPHA", "0.35"))
+BALL_INTERPOLATION_LIMIT = int(os.getenv("YOLO_BALL_INTERPOLATION_LIMIT", "30"))
 
 app = FastAPI(title="SoccerVision YOLO Worker")
 app.add_middleware(
@@ -147,11 +150,18 @@ def decode_frame(raw: str) -> Image.Image:
     return Image.open(io.BytesIO(base64.b64decode(raw))).convert("RGB")
 
 
-def position_from_box(box: tuple[float, float, float, float], width: int, height: int) -> dict[str, float]:
+def position_from_box(
+    box: tuple[float, float, float, float],
+    width: int,
+    height: int,
+    anchor: Literal["center", "bottom"] = "center",
+) -> dict[str, float]:
     x1, y1, x2, y2 = box
+    x = (x1 + x2) / 2
+    y = y2 if anchor == "bottom" else (y1 + y2) / 2
     return {
-        "x": round((((x1 + x2) / 2) / width) * 100, 1),
-        "y": round((((y1 + y2) / 2) / height) * 100, 1),
+        "x": round((x / width) * 100, 1),
+        "y": round((y / height) * 100, 1),
     }
 
 
@@ -210,7 +220,7 @@ def stabilize_player_ids(
     next_ids: dict[TeamId, int],
     max_jump: float = 16.0,
 ) -> dict[str, Any]:
-    """Assign stable hN/aN IDs across sparse frames when tracker IDs are absent."""
+    """Assign stable hN/aN IDs and smooth positions across tracker dropouts."""
     timestamp = float(frame["timestamp"])
     updated_players: list[dict[str, Any]] = []
 
@@ -219,17 +229,26 @@ def stabilize_player_ids(
         team_players = [p for p in frame["players"] if p["team"] == team]
 
         for player in team_players:
-            if player.get("number"):
-                stable_id = f"{'h' if team == 'home' else 'a'}{int(player['number'])}"
-                player["id"] = stable_id
-                updated_players.append(player)
-                continue
+            tracker_number = int(player["number"]) if player.get("number") else None
+            canonical_team: TeamId = team
+            if tracker_number is not None:
+                for candidate_team in ("home", "away"):
+                    if any(track.get("tracker_id") == tracker_number for track in tracks[candidate_team]):
+                        canonical_team = candidate_team
+                        break
+                player["team"] = canonical_team
+
+            team_tracks = tracks[canonical_team]
 
             best_idx: Optional[int] = None
             best_cost = max_jump
-            for idx, track in enumerate(tracks[team]):
+            for idx, track in enumerate(team_tracks):
                 if idx in used_tracks:
                     continue
+                if tracker_number is not None and track.get("tracker_id") == tracker_number:
+                    best_idx = idx
+                    best_cost = 0
+                    break
                 age = timestamp - float(track["last_seen"])
                 if age > 8.0:
                     continue
@@ -239,18 +258,30 @@ def stabilize_player_ids(
                     best_cost = cost
 
             if best_idx is None:
-                next_ids[team] += 1
-                stable_id = f"{'h' if team == 'home' else 'a'}{next_ids[team]}"
-                tracks[team].append({
+                if tracker_number is None:
+                    next_ids[canonical_team] += 1
+                    tracker_number = next_ids[canonical_team]
+                else:
+                    next_ids[canonical_team] = max(next_ids[canonical_team], tracker_number)
+                stable_id = f"{'h' if canonical_team == 'home' else 'a'}{tracker_number}"
+                team_tracks.append({
                     "id": stable_id,
+                    "tracker_id": tracker_number,
                     "position": player["position"],
+                    "smoothed_position": player["position"],
                     "last_seen": timestamp,
                 })
             else:
                 used_tracks.add(best_idx)
-                track = tracks[team][best_idx]
+                track = team_tracks[best_idx]
                 stable_id = str(track["id"])
+                previous_smoothed = track.get("smoothed_position", track["position"])
+                smoothed = {
+                    "x": round(previous_smoothed["x"] * (1 - TRACK_SMOOTHING_ALPHA) + player["position"]["x"] * TRACK_SMOOTHING_ALPHA, 1),
+                    "y": round(previous_smoothed["y"] * (1 - TRACK_SMOOTHING_ALPHA) + player["position"]["y"] * TRACK_SMOOTHING_ALPHA, 1),
+                }
                 track["position"] = player["position"]
+                track["smoothed_position"] = smoothed
                 track["last_seen"] = timestamp
 
             player["id"] = stable_id
@@ -258,6 +289,7 @@ def stabilize_player_ids(
                 player["number"] = int(stable_id[1:])
             except Exception:
                 player["number"] = 0
+            player["position"] = team_tracks[best_idx]["smoothed_position"] if best_idx is not None else player["position"]
             updated_players.append(player)
 
     frame["players"] = updated_players
@@ -292,6 +324,37 @@ def smooth_possession(
 
     frame["possessingPlayer"] = {"team": nearest["team"], "playerId": nearest["id"]}
     return nearest["team"]
+
+
+def interpolate_ball_positions(frames: list[dict[str, Any]], limit: int = BALL_INTERPOLATION_LIMIT) -> list[dict[str, Any]]:
+    """Fill short gaps in ball detections, matching the cleaner offline demo behavior."""
+    known = [(i, frame.get("ballPosition")) for i, frame in enumerate(frames) if frame.get("ballPosition")]
+    if len(known) < 2:
+        return frames
+
+    for (start_idx, start_pos), (end_idx, end_pos) in zip(known, known[1:]):
+        if start_pos is None or end_pos is None:
+            continue
+        gap = end_idx - start_idx - 1
+        if gap <= 0 or gap > limit:
+            continue
+        for offset in range(1, gap + 1):
+            alpha = offset / (gap + 1)
+            frames[start_idx + offset]["ballPosition"] = {
+                "x": round(start_pos["x"] * (1 - alpha) + end_pos["x"] * alpha, 1),
+                "y": round(start_pos["y"] * (1 - alpha) + end_pos["y"] * alpha, 1),
+            }
+            frames[start_idx + offset]["ballInterpolated"] = True
+
+    return frames
+
+
+def recompute_possession_for_frames(frames: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    previous_possession: Union[TeamId, Literal["contested"]] = "contested"
+    for frame in frames:
+        frame["possession"] = smooth_possession(frame, previous_possession)
+        previous_possession = frame["possession"]
+    return frames
 
 
 def passes_confidence(cls_name: str, confidence: float) -> bool:
@@ -400,7 +463,7 @@ def analyze_single_frame(raw: RawFrame, frame_index: int) -> dict[str, Any]:
 
     for detection, team in zip(person_detections, teams):
         team_counts[team] += 1
-        position = position_from_box(detection.xyxy, width, height)
+        position = position_from_box(detection.xyxy, width, height, anchor="bottom")
         tracker_number = detection.tracker_id if detection.tracker_id is not None else team_counts[team]
         player_id = f"{'h' if team == 'home' else 'a'}{tracker_number}"
         players.append(
@@ -465,7 +528,7 @@ def analyze_precomputed_frame(
 
     for detection, team in zip(person_detections, teams):
         team_counts[team] += 1
-        position = position_from_box(detection.xyxy, width, height)
+        position = position_from_box(detection.xyxy, width, height, anchor="bottom")
         tracker_number = detection.tracker_id if detection.tracker_id is not None else team_counts[team]
         player_id = f"{'h' if team == 'home' else 'a'}{tracker_number}"
         players.append(
@@ -521,7 +584,7 @@ def health() -> dict[str, str]:
 @app.post("/analyze-video")
 def analyze_video_file(
     file: UploadFile = File(...),
-    fps: float = Form(default=5.0),
+    fps: float = Form(default=DEFAULT_DENSE_FPS),
 ) -> dict[str, Any]:
     """Accept a raw video file and return dense per-frame tracking data.
 
@@ -685,6 +748,7 @@ def analyze_video_file(
                 frame_idx += 1
 
         cap.release()
+        dense_frames = recompute_possession_for_frames(interpolate_ball_positions(dense_frames))
         logger.info("analyze-video: complete — %d dense frames", len(dense_frames))
         return {"frames": dense_frames, "videoFps": video_fps, "targetFps": fps}
 

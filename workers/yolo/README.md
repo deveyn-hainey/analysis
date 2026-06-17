@@ -84,6 +84,7 @@ resolve it to a local path before `ultralytics.YOLO()` loads it:
 ```bash
 YOLO_MODEL_PATH=Adit-jain/soccana \
 YOLO_HF_FILENAME=Model/weights/best.pt \
+YOLO_DENSE_FPS=15 \
 uvicorn app:app --host 0.0.0.0 --port 8001
 ```
 
@@ -93,6 +94,20 @@ case-insensitive). They line up with this worker's defaults, so no
 `YOLO_PLAYER_CLASSES`/`YOLO_BALL_CLASSES`/`YOLO_REFEREE_CLASSES` overrides are needed —
 unlike the `keremberke/yolov5m-football` model above, this one also gives you a real
 referee class, so officials get excluded from team-color clustering correctly.
+
+For smoother dashboard overlays, the worker now mirrors the cleaner offline model
+pipeline more closely:
+
+- dense video tracking defaults to `YOLO_DENSE_FPS=15` instead of 5fps
+- player positions use the bottom-center of the detection box, closer to the feet
+- stable track IDs are smoothed over time to reduce detector jitter
+- short ball-detection gaps are linearly interpolated with `YOLO_BALL_INTERPOLATION_LIMIT`
+- tracker IDs keep their previous team assignment when jersey clustering flickers
+
+The biggest remaining difference from `Soccer_Analysis_Model` is pitch homography:
+that repo also uses a keypoint model to project image detections onto true pitch
+coordinates. This worker still emits image-percent coordinates, so tactical views
+will improve further once a keypoint model/homography pass is added.
 
 ## Fine-tune a soccer detector
 
