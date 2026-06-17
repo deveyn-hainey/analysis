@@ -632,6 +632,23 @@ function PassNetworkPanel({ frames, currentFrame, teamName }: { frames: FrameDat
       }))
   ).slice(0, 11);
   const maxTouches = Math.max(1, ...nodes.map((node) => node.touches));
+  const realLinks = network.links.filter((link) =>
+    nodes.some((node) => node.id === link.from) && nodes.some((node) => node.id === link.to)
+  );
+  const estimatedLinks = nodes
+    .flatMap((node, i) =>
+      nodes.slice(i + 1).map((other) => ({
+        from: node.id,
+        to: other.id,
+        count: 1,
+        distance: Math.hypot(node.position.x - other.position.x, node.position.y - other.position.y),
+      }))
+    )
+    .sort((a, b) => a.distance - b.distance)
+    .filter((link) => link.distance <= 36)
+    .slice(0, Math.min(10, Math.max(0, nodes.length - 2)));
+  const links = realLinks.length >= 3 ? realLinks : estimatedLinks;
+  const linksAreEstimated = realLinks.length < 3;
 
   return (
     <div className={`${PANEL} p-6`}>
@@ -640,7 +657,7 @@ function PassNetworkPanel({ frames, currentFrame, teamName }: { frames: FrameDat
       <div className="relative mx-auto mt-8 aspect-[700/454] max-w-4xl rounded-lg bg-[#09110c]">
         <PitchLines />
         <svg viewBox="0 0 700 454" className="absolute inset-0 h-full w-full">
-          {network.links.map((link) => {
+          {links.map((link) => {
             const node = nodes.find((candidate) => candidate.id === link.from);
             const next = nodes.find((candidate) => candidate.id === link.to);
             if (!node || !next) return null;
@@ -652,8 +669,8 @@ function PassNetworkPanel({ frames, currentFrame, teamName }: { frames: FrameDat
                 x2={next.position.x * 7}
                 y2={next.position.y * 4.54}
                 stroke="#5ee178"
-                strokeWidth={1.5 + Math.min(5, link.count)}
-                opacity={0.32}
+                strokeWidth={linksAreEstimated ? 3 : 1.5 + Math.min(5, link.count)}
+                opacity={linksAreEstimated ? 0.42 : 0.32}
               />
             );
           })}
@@ -680,7 +697,11 @@ function PassNetworkPanel({ frames, currentFrame, teamName }: { frames: FrameDat
         </svg>
       </div>
       <div className="mt-5 text-xs font-mono text-[#829086]">
-        {nodes.length ? "● node size = recent touches - line weight = possession transitions - white dot = live position" : "No stable possession-player transitions available"}
+        {nodes.length
+          ? linksAreEstimated
+            ? "● node size = touches - connectors = estimated team shape - white dot = live position"
+            : "● node size = touches - line weight = pass volume - white dot = live position"
+          : "No stable possession-player transitions available"}
       </div>
     </div>
   );
