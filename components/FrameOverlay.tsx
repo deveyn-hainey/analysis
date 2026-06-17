@@ -38,28 +38,22 @@ export default function FrameOverlay({ base64, players, ballPosition, referees }
             const fill = DOT_COLOR[p.team] ?? "#ffffff";
             return (
               <g key={p.id}>
-                <circle
-                  cx={cx}
-                  cy={cy}
-                  r={10}
+                <path
+                  d={`M ${cx - 24} ${cy + 18} A 24 8 0 0 0 ${cx + 24} ${cy + 18}`}
                   fill={fill}
-                  fillOpacity={0.82}
+                  fillOpacity={0}
                   stroke="#000"
-                  strokeWidth={1.5}
+                  strokeWidth={4}
+                  strokeOpacity={0.55}
+                  strokeLinecap="round"
                 />
-                {p.number > 0 && (
-                  <text
-                    x={cx}
-                    y={cy + 3.5}
-                    textAnchor="middle"
-                    fontSize={8}
-                    fontWeight="700"
-                    fill="#000"
-                    fontFamily="monospace"
-                  >
-                    {p.number}
-                  </text>
-                )}
+                <path
+                  d={`M ${cx - 24} ${cy + 18} A 24 8 0 0 0 ${cx + 24} ${cy + 18}`}
+                  fill="none"
+                  stroke={fill}
+                  strokeWidth={2.5}
+                  strokeLinecap="round"
+                />
               </g>
             );
           })}

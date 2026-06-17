@@ -137,6 +137,7 @@ class Detection:
     cls_name: str
     confidence: float
     xyxy: tuple[float, float, float, float]
+    tracker_id: int | None = None
 
 
 def decode_frame(raw: str) -> Image.Image:
@@ -219,6 +220,7 @@ def detections_for_image(image: Image.Image) -> list[Detection]:
                     cls_name=cls_name,
                     confidence=float(confidence),
                     xyxy=(float(x1), float(y1), float(x2), float(y2)),
+                    tracker_id=None,
                 )
             )
         return detections
@@ -249,6 +251,34 @@ def detections_for_image(image: Image.Image) -> list[Detection]:
                 cls_name=cls_name,
                 confidence=confidence,
                 xyxy=tuple(float(v) for v in box.xyxy[0].tolist()),
+                tracker_id=None,
+            )
+        )
+
+    return detections
+
+
+def detections_for_ultralytics_result(result: Any) -> list[Detection]:
+    names = result.names
+    detections: list[Detection] = []
+
+    for box in result.boxes:
+        cls_id = int(box.cls[0])
+        cls_name = str(names.get(cls_id, cls_id)).lower()
+        confidence = float(box.conf[0])
+        if not passes_confidence(cls_name, confidence):
+            continue
+
+        tracker_id = None
+        if getattr(box, "id", None) is not None:
+            tracker_id = int(box.id[0])
+
+        detections.append(
+            Detection(
+                cls_name=cls_name,
+                confidence=confidence,
+                xyxy=tuple(float(v) for v in box.xyxy[0].tolist()),
+                tracker_id=tracker_id,
             )
         )
 
@@ -274,10 +304,12 @@ def analyze_single_frame(raw: RawFrame, frame_index: int) -> dict[str, Any]:
     for detection, team in zip(person_detections, teams):
         team_counts[team] += 1
         position = position_from_box(detection.xyxy, width, height)
+        tracker_number = detection.tracker_id if detection.tracker_id is not None else team_counts[team]
+        player_id = f"{'h' if team == 'home' else 'a'}{tracker_number}"
         players.append(
             {
-                "id": f"{'h' if team == 'home' else 'a'}{team_counts[team]}",
-                "number": 0,
+                "id": player_id,
+                "number": detection.tracker_id or 0,
                 "team": team,
                 "role": player_role(position, team),
                 "position": position,
@@ -337,10 +369,12 @@ def analyze_precomputed_frame(
     for detection, team in zip(person_detections, teams):
         team_counts[team] += 1
         position = position_from_box(detection.xyxy, width, height)
+        tracker_number = detection.tracker_id if detection.tracker_id is not None else team_counts[team]
+        player_id = f"{'h' if team == 'home' else 'a'}{tracker_number}"
         players.append(
             {
-                "id": f"{'h' if team == 'home' else 'a'}{team_counts[team]}",
-                "number": 0,
+                "id": player_id,
+                "number": detection.tracker_id or 0,
                 "team": team,
                 "role": player_role(position, team),
                 "position": position,
@@ -461,18 +495,24 @@ def analyze_video_file(
         # ── Pass 2: dense tracking at target fps ────────────────────────────────
         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
         dense_frames: list[dict[str, Any]] = []
-        frame_idx = 0
-        output_idx = 0
 
-        while True:
-            ret, bgr = cap.read()
-            if not ret:
-                break
+        if not use_huggingface_yolov5():
+            tracker_config = os.getenv("YOLO_TRACKER", "bytetrack.yaml")
+            tracked_results = model.track(
+                source=tmp_path,
+                stream=True,
+                persist=True,
+                tracker=tracker_config,
+                conf=min(CONFIDENCE, BALL_CONFIDENCE),
+                imgsz=IMAGE_SIZE,
+                vid_stride=frame_step,
+                verbose=False,
+            )
 
-            if frame_idx % frame_step == 0:
-                timestamp = round(frame_idx / video_fps, 3)
-                img = Image.fromarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
-                dets = detections_for_image(img)
+            for output_idx, result in enumerate(tracked_results):
+                timestamp = round((output_idx * frame_step) / video_fps, 3)
+                img = Image.fromarray(cv2.cvtColor(result.orig_img, cv2.COLOR_BGR2RGB))
+                dets = detections_for_ultralytics_result(result)
                 person_dets = [
                     d for d in dets
                     if d.cls_name in PLAYER_CLASSES and d.cls_name not in REFEREE_CLASSES
@@ -489,18 +529,54 @@ def analyze_video_file(
                     teams = split_teams(colors)
 
                 raw = RawFrame(base64="", timestamp=timestamp)
-                dense_frames.append(
-                    analyze_precomputed_frame(raw, output_idx, img, dets, teams)
-                )
-                output_idx += 1
+                dense_frames.append(analyze_precomputed_frame(raw, output_idx, img, dets, teams))
 
-                if output_idx % 50 == 0:
+                if (output_idx + 1) % 50 == 0:
                     logger.info(
                         "analyze-video: %d / ~%d frames processed",
-                        output_idx, max(1, total_frames // frame_step),
+                        output_idx + 1, max(1, total_frames // frame_step),
                     )
+        else:
+            frame_idx = 0
+            output_idx = 0
 
-            frame_idx += 1
+            while True:
+                ret, bgr = cap.read()
+                if not ret:
+                    break
+
+                if frame_idx % frame_step == 0:
+                    timestamp = round(frame_idx / video_fps, 3)
+                    img = Image.fromarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+                    dets = detections_for_image(img)
+                    person_dets = [
+                        d for d in dets
+                        if d.cls_name in PLAYER_CLASSES and d.cls_name not in REFEREE_CLASSES
+                    ]
+                    colors = [crop_mean_color(img, d.xyxy) for d in person_dets]
+
+                    if global_centroids and colors:
+                        home_c, away_c = global_centroids
+                        teams: list[TeamId] = [
+                            "home" if np.linalg.norm(c - home_c) <= np.linalg.norm(c - away_c) else "away"
+                            for c in colors
+                        ]
+                    else:
+                        teams = split_teams(colors)
+
+                    raw = RawFrame(base64="", timestamp=timestamp)
+                    dense_frames.append(
+                        analyze_precomputed_frame(raw, output_idx, img, dets, teams)
+                    )
+                    output_idx += 1
+
+                    if output_idx % 50 == 0:
+                        logger.info(
+                            "analyze-video: %d / ~%d frames processed",
+                            output_idx, max(1, total_frames // frame_step),
+                        )
+
+                frame_idx += 1
 
         cap.release()
         logger.info("analyze-video: complete — %d dense frames", len(dense_frames))

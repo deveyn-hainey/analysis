@@ -14,7 +14,7 @@ import {
   Target,
   AlertTriangle,
 } from "lucide-react";
-import type { MatchAnalysis, FrameData } from "@/lib/types";
+import type { MatchAnalysis, FrameData, Player, Position } from "@/lib/types";
 import SoccerField from "@/components/SoccerField";
 import FrameOverlay from "@/components/FrameOverlay";
 import EventTimeline from "@/components/EventTimeline";
@@ -33,20 +33,55 @@ function formatDuration(s: number) {
   return `${m}:${sec.toString().padStart(2, "0")}`;
 }
 
-// Linear interpolation between two sampled frames for smooth overlay motion.
-// Players are matched by team + jersey number; unmatched players don't interpolate.
+// Linear interpolation between sampled frames for smooth overlay motion.
+// IDs from the YOLO worker are currently per-frame, so players are also matched
+// by nearest same-team position to avoid visual jumps when detection order changes.
+function lerpPosition(a: Position, b: Position, alpha: number): Position {
+  return {
+    x: +(a.x + (b.x - a.x) * alpha).toFixed(2),
+    y: +(a.y + (b.y - a.y) * alpha).toFixed(2),
+  };
+}
+
+function distance(a: Position, b: Position) {
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
+function matchPlayersByTeamAndDistance(aPlayers: Player[], bPlayers: Player[], maxDistance = 16) {
+  const used = new Set<string>();
+
+  return aPlayers.map((player) => {
+    let best: Player | undefined;
+    let bestDistance = Number.POSITIVE_INFINITY;
+
+    for (const candidate of bPlayers) {
+      if (used.has(candidate.id) || candidate.team !== player.team) continue;
+
+      const d = distance(player.position, candidate.position);
+      const numberMatches = player.number > 0 && candidate.number > 0 && player.number === candidate.number;
+      const allowedDistance = numberMatches ? maxDistance * 1.6 : maxDistance;
+
+      if (d <= allowedDistance && d < bestDistance) {
+        best = candidate;
+        bestDistance = d;
+      }
+    }
+
+    if (best) used.add(best.id);
+    return { player, match: best };
+  });
+}
+
 function interpolateFrame(a: FrameData, b: FrameData, alpha: number): FrameData {
+  const matches = matchPlayersByTeamAndDistance(a.players, b.players, 26);
   const players = a.players.map((player) => {
     const match =
-      b.players.find((p) => p.team === player.team && p.number === player.number) ??
-      b.players.find((p) => p.team === player.team);
+      b.players.find((p) => p.team === player.team && player.number > 0 && p.number === player.number) ??
+      matches.find((entry) => entry.player.id === player.id)?.match;
     if (!match) return player;
     return {
       ...player,
-      position: {
-        x: player.position.x + (match.position.x - player.position.x) * alpha,
-        y: player.position.y + (match.position.y - player.position.y) * alpha,
-      },
+      position: lerpPosition(player.position, match.position, alpha),
     };
   });
 
@@ -61,10 +96,48 @@ function interpolateFrame(a: FrameData, b: FrameData, alpha: number): FrameData 
   return { ...a, players, ballPosition };
 }
 
+function interpolateDenseFrame(frames: FrameData[], timestamp: number): FrameData {
+  if (frames.length === 1 || timestamp <= frames[0].timestamp) return frames[0];
+  const last = frames[frames.length - 1];
+  if (timestamp >= last.timestamp) return last;
+
+  let nextIdx = frames.findIndex((frame) => frame.timestamp >= timestamp);
+  if (nextIdx <= 0) nextIdx = 1;
+
+  const prev = frames[nextIdx - 1];
+  const next = frames[nextIdx];
+  const span = Math.max(0.001, next.timestamp - prev.timestamp);
+  const alpha = Math.min(1, Math.max(0, (timestamp - prev.timestamp) / span));
+
+  return interpolateFrame(prev, next, alpha);
+}
+
+function easeDisplayedFrame(previous: FrameData | null, target: FrameData): FrameData {
+  if (!previous || Math.abs(previous.timestamp - target.timestamp) > 1) return target;
+
+  const matches = matchPlayersByTeamAndDistance(previous.players, target.players, 12);
+  const smoothedPlayers = target.players.map((player) => {
+    const prev = matches.find((entry) => entry.match?.id === player.id)?.player;
+    if (!prev) return player;
+
+    return {
+      ...player,
+      position: lerpPosition(prev.position, player.position, 0.42),
+    };
+  });
+
+  const ballPosition =
+    previous.ballPosition && target.ballPosition
+      ? lerpPosition(previous.ballPosition, target.ballPosition, 0.55)
+      : target.ballPosition;
+
+  return { ...target, players: smoothedPlayers, ballPosition };
+}
+
 type ViewMode = "coach" | "player";
 
-// SVG overlay rendered on top of the video element — draws team-coloured ellipses
-// at players' feet (matching the supervision EllipseAnnotator style) plus a ball dot.
+// SVG overlay rendered on top of the video element — draws team-coloured rings
+// at players' feet, matching the lightweight tracking style from the model repo.
 function TrackingOverlaySvg({ frame }: { frame: FrameData }) {
   const HOME = "#3b82f6";
   const AWAY = "#ef4444";
@@ -81,70 +154,28 @@ function TrackingOverlaySvg({ frame }: { frame: FrameData }) {
         const color = player.team === "home" ? HOME : AWAY;
         return (
           <g key={player.id}>
-            {/* Foot ellipse — matches supervision EllipseAnnotator */}
-            <ellipse
-              cx={cx}
-              cy={cy + 20}
-              rx={26}
-              ry={8}
+            <path
+              d={`M ${cx - 28} ${cy + 20} A 28 9 0 0 0 ${cx + 28} ${cy + 20}`}
               fill="none"
               stroke={color}
-              strokeWidth={2.5}
-              strokeOpacity={0.9}
+              strokeWidth={3}
+              strokeOpacity={0.95}
+              strokeLinecap="round"
             />
-            {/* Body dot */}
-            <circle
-              cx={cx}
-              cy={cy}
-              r={11}
-              fill={color}
-              fillOpacity={0.85}
-              stroke="#000"
-              strokeWidth={1.5}
-            />
-            {/* Jersey number */}
-            {player.number > 0 && (
-              <text
-                x={cx}
-                y={cy + 4}
-                textAnchor="middle"
-                fontSize={8}
-                fontWeight="700"
-                fill="#fff"
-                fontFamily="monospace"
-              >
-                {player.number}
-              </text>
-            )}
-            {/* #number label above */}
-            <text
-              x={cx}
-              y={cy - 16}
-              textAnchor="middle"
-              fontSize={11}
-              fontWeight="700"
-              fill="#fff"
-              fontFamily="monospace"
-              stroke="#000"
-              strokeWidth={2.5}
-              paintOrder="stroke"
-            >
-              #{player.number > 0 ? player.number : "?"}
-            </text>
           </g>
         );
       })}
       {/* Referees */}
       {frame.referees?.map((pos, i) => (
-        <ellipse
+        <path
           key={`ref-${i}`}
-          cx={(pos.x / 100) * 1280}
-          cy={(pos.y / 100) * 720 + 20}
-          rx={26}
-          ry={8}
+          d={`M ${(pos.x / 100) * 1280 - 26} ${(pos.y / 100) * 720 + 20} A 26 8 0 0 0 ${
+            (pos.x / 100) * 1280 + 26
+          } ${(pos.y / 100) * 720 + 20}`}
           fill="none"
           stroke="#fbbf24"
           strokeWidth={2.5}
+          strokeLinecap="round"
         />
       ))}
       {/* Ball */}
@@ -178,11 +209,16 @@ function DashboardContent() {
   const [denseFrames, setDenseFrames] = useState<import("@/lib/types").FrameData[]>([]);
   const [denseStatus, setDenseStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const videoRef = useRef<HTMLVideoElement>(null);
+  const liveFrameRef = useRef<FrameData | null>(null);
 
   useEffect(() => {
     const url = videoStore.get();
     setVideoUrl(url);
   }, []);
+
+  useEffect(() => {
+    liveFrameRef.current = liveFrame;
+  }, [liveFrame]);
 
   // Subscribe to dense frame store — fires whenever dense tracking status changes.
   useEffect(() => {
@@ -195,8 +231,8 @@ function DashboardContent() {
   }, []);
 
   // RAF loop: reads video.currentTime at ~30fps and drives both the SVG overlay and SoccerField.
-  // When dense frames are available (5fps real detections) we snap to the nearest one.
-  // Otherwise we fall back to linear interpolation between sparse sampled keyframes.
+  // Dense frames are interpolated between real 5fps detections, then eased lightly
+  // to reduce detector jitter. Sparse analysis frames use the same interpolation fallback.
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !analysis || !videoUrl) return;
@@ -214,16 +250,11 @@ function DashboardContent() {
         const dense = denseFrameStore.getFrames();
 
         if (dense.length > 0) {
-          // Dense path: snap to the nearest frame by timestamp (no interpolation needed
-          // at 5fps — gap is only 200ms, imperceptible for tracking dots).
-          let best = dense[0];
-          let bestDist = Math.abs(best.timestamp - t);
-          for (let i = 1; i < dense.length; i++) {
-            const d = Math.abs(dense[i].timestamp - t);
-            if (d < bestDist) { best = dense[i]; bestDist = d; }
-          }
-          setSelectedFrame(best);
-          setLiveFrame(best);
+          const target = interpolateDenseFrame(dense, t);
+          const smoothed = easeDisplayedFrame(liveFrameRef.current, target);
+          liveFrameRef.current = smoothed;
+          setSelectedFrame(target);
+          setLiveFrame(smoothed);
         } else {
           // Sparse fallback: linear interpolation between the two surrounding keyframes.
           let prevIdx = 0;
@@ -235,10 +266,13 @@ function DashboardContent() {
           const next = sparseSorted[Math.min(prevIdx + 1, sparseSorted.length - 1)];
           setSelectedFrame(prev);
           if (prev === next || next.timestamp <= prev.timestamp) {
+            liveFrameRef.current = prev;
             setLiveFrame(prev);
           } else {
             const alpha = Math.min(1, (t - prev.timestamp) / (next.timestamp - prev.timestamp));
-            setLiveFrame(interpolateFrame(prev, next, alpha));
+            const target = interpolateFrame(prev, next, alpha);
+            liveFrameRef.current = target;
+            setLiveFrame(target);
           }
         }
       }
@@ -303,24 +337,28 @@ function DashboardContent() {
     URL.revokeObjectURL(url);
   };
 
-  // Shared pitch panel — Tactical shows video+overlay side-by-side with the
-  // abstract field (both driven by the interpolated liveFrame), Frame shows
+  // Shared pitch panel — Tactical stacks video+overlay above the abstract field
+  // (both driven by the interpolated liveFrame), Frame shows
   // the raw extracted image with dot overlay for precise frame inspection.
   const pitchPanel = (
     <div className="card p-4">
       <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
         <div>
           <h2 className="text-sm font-semibold text-[#f0fdf4]">
-            {pitchView === "tactical" ? "Tracking + Tactical" : "Frame View"}
+            {pitchView === "tactical" ? "Live Tracking" : "Frame View"}
           </h2>
           {pitchView === "tactical" && videoUrl && (
-            <p className="text-xs text-[#6b9e6b] mt-0.5 flex items-center gap-1.5">
-              Player overlay and field sync to playback in real time
+            <p className="text-xs text-[#6b9e6b] mt-0.5 flex items-center gap-2">
+              <span>Player rings and field sync to playback in real time</span>
               {denseStatus === "loading" && (
-                <span className="text-yellow-400 animate-pulse">· dense tracking loading…</span>
+                <span className="rounded-full border border-yellow-400/30 bg-yellow-400/10 px-2 py-0.5 text-yellow-300 animate-pulse">
+                  Dense tracking loading
+                </span>
               )}
               {denseStatus === "ready" && (
-                <span className="text-green-400">· {denseFrames.length} dense frames active</span>
+                <span className="rounded-full border border-green-400/30 bg-green-400/10 px-2 py-0.5 text-green-300">
+                  {denseFrames.length} dense frames active
+                </span>
               )}
             </p>
           )}
@@ -349,19 +387,24 @@ function DashboardContent() {
 
       {pitchView === "tactical" && (
         videoUrl ? (
-          // Side-by-side: video+tracking overlay LEFT, abstract tactical field RIGHT
-          <div className="grid grid-cols-5 gap-2">
-            <div className="col-span-3 relative rounded-lg overflow-hidden bg-black">
+          <div className="space-y-4">
+            <div className="relative rounded-lg overflow-hidden bg-black">
               <video
                 ref={videoRef}
                 src={videoUrl}
                 controls
-                className="w-full block"
+                className="w-full block aspect-video object-contain"
               />
               <TrackingOverlaySvg frame={displayFrame} />
             </div>
-            <div className="col-span-2 flex flex-col justify-center">
-              <SoccerField frame={displayFrame} />
+            <div className="rounded-lg border border-[#1c3020] bg-[#081208] p-3">
+              <div className="mb-2 flex items-center justify-between text-xs text-[#6b9e6b]">
+                <span>Tactical frame</span>
+                <span>{formatDuration(displayFrame.timestamp)}</span>
+              </div>
+              <div className="mx-auto max-w-4xl">
+                <SoccerField frame={displayFrame} />
+              </div>
             </div>
           </div>
         ) : (
@@ -474,7 +517,7 @@ function DashboardContent() {
         </div>
       </nav>
 
-      <main className="max-w-7xl mx-auto px-6 py-6 space-y-6">
+      <main className="max-w-[1500px] mx-auto px-6 py-6 space-y-6">
         {/* Match header */}
         <div className="card p-5">
           <div className="flex items-center justify-between flex-wrap gap-4">
@@ -553,9 +596,9 @@ function DashboardContent() {
               />
             </div>
 
-            <div className="grid lg:grid-cols-5 gap-4">
-              <div className="lg:col-span-3">{pitchPanel}</div>
-              <div className="lg:col-span-2 card p-4">
+            <div className="grid lg:grid-cols-12 gap-4">
+              <div className="lg:col-span-8">{pitchPanel}</div>
+              <div className="lg:col-span-4 card p-4">
                 <h2 className="text-sm font-semibold text-[#f0fdf4] mb-3">Event Timeline</h2>
                 <EventTimeline
                   events={analysis.keyEvents}
@@ -620,9 +663,9 @@ function DashboardContent() {
               />
             </div>
 
-            <div className="grid lg:grid-cols-5 gap-4">
-              <div className="lg:col-span-3">{pitchPanel}</div>
-              <div className="lg:col-span-2 card p-4">
+            <div className="grid lg:grid-cols-12 gap-4">
+              <div className="lg:col-span-8">{pitchPanel}</div>
+              <div className="lg:col-span-4 card p-4">
                 <h2 className="text-sm font-semibold text-[#f0fdf4] mb-3">Event Timeline</h2>
                 <EventTimeline
                   events={analysis.keyEvents}

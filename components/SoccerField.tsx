@@ -109,18 +109,6 @@ export default function SoccerField({ frame }: SoccerFieldProps) {
               {isHovered && <circle cx={x} cy={y} r={18} fill={color} opacity={0.15} />}
               {accent && <circle cx={x} cy={y} r={14} fill="none" stroke={accent} strokeWidth={2} opacity={0.8} />}
               <circle cx={x} cy={y} r={11} fill={color} stroke="white" strokeWidth={1.5} />
-              <text
-                x={x}
-                y={y}
-                textAnchor="middle"
-                dominantBaseline="central"
-                fill="white"
-                fontSize={8}
-                fontWeight="bold"
-                fontFamily="system-ui"
-              >
-                {player.number}
-              </text>
             </g>
           );
         })}
