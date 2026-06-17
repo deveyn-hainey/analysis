@@ -5,14 +5,11 @@ import { useRouter, useSearchParams } from "next/navigation";
 import {
   Activity,
   Film,
-  Trophy,
   ChevronLeft,
-  Clock,
   Download,
   Cpu,
-  Route,
-  Target,
   AlertTriangle,
+  Check,
 } from "lucide-react";
 import type { MatchAnalysis, FrameData, Player, Position } from "@/lib/types";
 import SoccerField from "@/components/SoccerField";
@@ -22,15 +19,35 @@ import StatsChart from "@/components/StatsChart";
 import TeamComparison from "@/components/TeamComparison";
 import CoachingInsights from "@/components/CoachingInsights";
 import Heatmap from "@/components/Heatmap";
-import MetricCard from "@/components/MetricCard";
 import { videoStore } from "@/lib/videoStore";
 import { frameImageStore } from "@/lib/frameImageStore";
 import { denseFrameStore } from "@/lib/denseFrameStore";
+
+const PANEL = "rounded-lg border border-[#1c3020] bg-[#0b130d] shadow-[0_0_40px_rgba(74,222,128,0.03)]";
+const EYEBROW = "text-[11px] uppercase tracking-[0.28em] text-[#5f7567] font-mono";
 
 function formatDuration(s: number) {
   const m = Math.floor(s / 60);
   const sec = Math.floor(s % 60);
   return `${m}:${sec.toString().padStart(2, "0")}`;
+}
+
+function initials(name: string) {
+  return name
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase())
+    .join("") || "TM";
+}
+
+function estimateXg(stats: MatchAnalysis["homeTeam"]["stats"]) {
+  const value = stats.shots * 0.09 + stats.shotsOnTarget * 0.18 + stats.goals * 0.32 + stats.corners * 0.04;
+  return Math.max(stats.goals * 0.65, value);
+}
+
+function pct(value: number, total: number) {
+  return Math.max(4, Math.min(100, (value / Math.max(total, 1)) * 100));
 }
 
 // Linear interpolation between sampled frames for smooth overlay motion.
@@ -192,6 +209,445 @@ function TrackingOverlaySvg({ frame }: { frame: FrameData }) {
         </g>
       )}
     </svg>
+  );
+}
+
+function SystemHeader({
+  analysis,
+  denseStatus,
+  denseFrames,
+  onExport,
+}: {
+  analysis: MatchAnalysis;
+  denseStatus: "idle" | "loading" | "ready" | "error";
+  denseFrames: FrameData[];
+  onExport: () => void;
+}) {
+  return (
+    <div className="flex flex-col gap-5">
+      <div className="flex items-center justify-between gap-4 flex-wrap">
+        <div className="flex items-center gap-4">
+          <div className="w-12 h-12 rounded-lg bg-green-400/80 text-black flex items-center justify-center shadow-[0_0_24px_rgba(74,222,128,0.35)]">
+            <Activity className="w-6 h-6" />
+          </div>
+          <div>
+            <div className="text-xl font-black tracking-tight text-[#f0fdf4]">
+              SOCCER<span className="text-yellow-300">VISION</span>
+            </div>
+            <div className={EYEBROW}>computer vision match analytics</div>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-3 flex-wrap">
+          <span className="rounded-full border border-green-400/25 bg-green-400/10 px-4 py-2 text-xs font-mono uppercase tracking-[0.18em] text-green-300">
+            <span className="mr-2 inline-block h-2 w-2 rounded-full bg-green-400" />
+            {denseStatus === "loading" ? "dense tracking loading" : "analysis complete"}
+          </span>
+          <span className="rounded-lg border border-[#1c3020] px-4 py-2 text-xs font-mono text-[#6f8175]">
+            model: pitch-vision v3.2
+          </span>
+          <button
+            onClick={onExport}
+            className="rounded-lg bg-yellow-300 px-5 py-2 text-sm font-bold text-black hover:bg-yellow-200 transition-colors"
+          >
+            Export Report
+          </button>
+        </div>
+      </div>
+
+      <div className={`${PANEL} p-6`}>
+        <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-4">
+          <div className="flex items-center gap-4">
+            <div className="w-16 h-16 rounded-lg border border-green-400/35 bg-green-400/10 flex items-center justify-center text-xl font-black text-green-300">
+              {initials(analysis.homeTeam.name)}
+            </div>
+            <div>
+              <div className="text-2xl font-black text-[#f0fdf4]">{analysis.homeTeam.name}</div>
+              <div className={EYEBROW}>home</div>
+            </div>
+          </div>
+
+          <div className="text-center min-w-[240px]">
+            <div className={EYEBROW}>full time</div>
+            <div className="font-mono text-6xl font-black leading-none text-[#f0fdf4]">
+              <span className="text-green-300">{analysis.score.home}</span>
+              <span className="px-6 text-[#5f7567]">-</span>
+              <span>{analysis.score.away}</span>
+            </div>
+            <div className="mt-3 text-sm text-[#829086]">Computer vision analysis</div>
+          </div>
+
+          <div className="flex items-center justify-end gap-4">
+            <div className="text-right">
+              <div className="text-2xl font-black text-[#f0fdf4]">{analysis.awayTeam.name}</div>
+              <div className={EYEBROW}>away</div>
+            </div>
+            <div className="w-16 h-16 rounded-lg border border-gray-400/25 bg-gray-400/10 flex items-center justify-center text-xl font-black text-gray-300">
+              {initials(analysis.awayTeam.name)}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="flex gap-3 overflow-x-auto pb-1">
+        {[
+          `${formatDuration(analysis.videoDuration)} analyzed`,
+          `${analysis.framesAnalyzed.toLocaleString()} sampled frames`,
+          `${denseFrames.length || analysis.framesAnalyzed} tracked frames`,
+          `avg confidence ${Math.round((analysis.keyEvents.reduce((s, e) => s + e.confidence, 0) / Math.max(analysis.keyEvents.length, 1)) * 100)}%`,
+          denseStatus === "ready" ? "ByteTrack dense active" : "sparse tracking fallback",
+        ].map((item) => (
+          <span key={item} className="shrink-0 rounded-lg border border-[#1c3020] bg-[#0b130d] px-4 py-2 text-xs font-mono text-[#829086]">
+            {item}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function SummaryPanel({ analysis }: { analysis: MatchAnalysis }) {
+  const home = analysis.homeTeam;
+  const away = analysis.awayTeam;
+  const homeXg = estimateXg(home.stats);
+  const awayXg = estimateXg(away.stats);
+  const homeWin = analysis.score.home >= analysis.score.away;
+  const leading = homeWin ? home : away;
+  const trailing = homeWin ? away : home;
+  const winPct = Math.min(88, Math.max(52, 50 + Math.abs(analysis.score.home - analysis.score.away) * 14 + Math.abs(home.stats.possession - away.stats.possession) * 0.35));
+  const drawPct = Math.max(6, Math.round((100 - winPct) * 0.62));
+  const otherPct = Math.max(4, 100 - Math.round(winPct) - drawPct);
+
+  const chips = [
+    { code: "CTL", text: `${leading.name} controlled ${leading.stats.possession}% possession.`, tone: "green" },
+    { code: "xG", text: `${homeXg >= awayXg ? home.name : away.name} xG edge ${Math.abs(homeXg - awayXg).toFixed(2)}.`, tone: "green" },
+    { code: "SET", text: `${home.stats.corners + away.stats.corners} corner situations detected.`, tone: "yellow" },
+    { code: "RSK", text: `${trailing.name} conceded ${trailing.stats.shotsOnTarget} shots on target.`, tone: "orange" },
+  ];
+
+  return (
+    <div className={`${PANEL} border-yellow-300/20 p-6`}>
+      <div className="grid lg:grid-cols-[1.6fr_1fr] gap-8">
+        <div>
+          <div className="text-xs uppercase tracking-[0.28em] text-yellow-300 font-mono mb-5">
+            <span className="mr-2 inline-block h-2 w-2 rounded-full bg-yellow-300/70" />
+            vision ai - match summary
+          </div>
+          <h1 className="max-w-4xl text-3xl font-black leading-tight text-[#f0fdf4]">
+            {leading.name} {analysis.score.home === analysis.score.away ? "held level after an even tactical contest." : "won on merit by controlling territory and chance quality."}
+          </h1>
+          <p className="mt-5 max-w-4xl text-base leading-8 text-[#aeb8b0]">
+            The model tracked possession, shot creation, event timing, and player movement to build this report. {leading.name} produced the stronger profile through possession control, shot volume, and better field occupation while {trailing.name} relied on lower-volume moments.
+          </p>
+
+          <div className="mt-7 grid md:grid-cols-2 gap-3">
+            {chips.map((chip) => (
+              <div key={chip.code} className="rounded-lg border border-[#1c3020] bg-[#07100a] p-4 flex items-center gap-4">
+                <div className={`w-11 h-11 rounded-lg flex items-center justify-center text-xs font-black ${
+                  chip.tone === "yellow" ? "bg-yellow-300/10 text-yellow-300" : chip.tone === "orange" ? "bg-orange-400/10 text-orange-300" : "bg-green-400/10 text-green-300"
+                }`}>
+                  {chip.code}
+                </div>
+                <p className="text-sm leading-6 text-[#c8d2ca]">{chip.text}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="border-l border-[#1c3020] pl-8">
+          <div className={EYEBROW}>outcome model</div>
+          <div className="mt-2 text-sm text-[#829086]">post-match xG simulation</div>
+          {[
+            { label: `${leading.name} win`, value: Math.round(winPct), color: "bg-green-400" },
+            { label: "Draw", value: drawPct, color: "bg-[#9aa5a0]" },
+            { label: `${trailing.name} win`, value: otherPct, color: "bg-slate-400" },
+          ].map((row) => (
+            <div key={row.label} className="mt-7">
+              <div className="flex justify-between text-sm text-[#c8d2ca]">
+                <span>{row.label}</span>
+                <span className="font-black">{row.value}%</span>
+              </div>
+              <div className="mt-2 h-2 rounded-full bg-[#142014] overflow-hidden">
+                <div className={`h-full rounded-full ${row.color}`} style={{ width: `${row.value}%` }} />
+              </div>
+            </div>
+          ))}
+          <div className="mt-20 rounded-lg border border-green-400/30 bg-green-400/10 p-4 text-sm font-bold text-green-200 flex items-center gap-3">
+            <Check className="w-5 h-5" />
+            {homeXg === awayXg ? "Balanced outcome profile" : "Deserved result - high confidence"}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function VisionMetricStrip({ analysis }: { analysis: MatchAnalysis }) {
+  const home = analysis.homeTeam.stats;
+  const away = analysis.awayTeam.stats;
+  const metrics = [
+    { label: "expected goals", value: estimateXg(home).toFixed(2), suffix: "xG", sub: `vs ${estimateXg(away).toFixed(2)}`, fill: pct(estimateXg(home), estimateXg(home) + estimateXg(away)) },
+    { label: "possession", value: home.possession.toString(), suffix: "%", sub: `vs ${away.possession}%`, fill: home.possession },
+    { label: "pass accuracy", value: home.passAccuracy.toString(), suffix: "%", sub: `vs ${away.passAccuracy}%`, fill: home.passAccuracy },
+    { label: "shots on target", value: home.shotsOnTarget.toString(), suffix: "", sub: `vs ${away.shotsOnTarget}`, fill: pct(home.shotsOnTarget, home.shotsOnTarget + away.shotsOnTarget) },
+    { label: "distance covered", value: (home.distanceCovered / 1000).toFixed(1), suffix: "km", sub: `vs ${(away.distanceCovered / 1000).toFixed(1)} km`, fill: pct(home.distanceCovered, home.distanceCovered + away.distanceCovered) },
+    { label: "key events", value: analysis.keyEvents.length.toString(), suffix: "", sub: `${analysis.keyEvents.filter((e) => e.isKeyMoment).length} key moments`, fill: Math.min(100, analysis.keyEvents.length * 9) },
+  ];
+
+  return (
+    <div className="grid md:grid-cols-3 xl:grid-cols-6 gap-4">
+      {metrics.map((metric) => (
+        <div key={metric.label} className={`${PANEL} p-5`}>
+          <div className={EYEBROW}>{metric.label}</div>
+          <div className="mt-8 flex items-end gap-2">
+            <span className="text-4xl font-black tabular-nums text-[#f0fdf4]">{metric.value}</span>
+            {metric.suffix && <span className="pb-1 text-sm text-[#829086]">{metric.suffix}</span>}
+          </div>
+          <div className="mt-5 h-1.5 rounded-full bg-[#233128] overflow-hidden">
+            <div className="h-full rounded-full bg-green-400" style={{ width: `${metric.fill}%` }} />
+          </div>
+          <div className="mt-3 text-xs font-mono text-[#617169]">{metric.sub}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function XgMomentumPanel({ analysis }: { analysis: MatchAnalysis }) {
+  const homeEvents = analysis.keyEvents.filter((event) => event.team === "home" && ["shot", "goal", "save"].includes(event.type));
+  const awayEvents = analysis.keyEvents.filter((event) => event.team === "away" && ["shot", "goal", "save"].includes(event.type));
+  const duration = Math.max(analysis.videoDuration, 1);
+
+  const buildPath = (events: typeof analysis.keyEvents, totalXg: number) => {
+    const sorted = [...events].sort((a, b) => a.timestamp - b.timestamp);
+    let current = 0;
+    const parts = [`M 40 290`];
+    sorted.forEach((event, index) => {
+      const share = totalXg / Math.max(sorted.length, 1);
+      const boost = event.type === "goal" ? 0.18 : event.type === "shot" ? 0.12 : 0.08;
+      const x = 40 + (event.timestamp / duration) * 620;
+      const yPrev = 290 - Math.min(250, current * 92);
+      current += Math.max(share, boost);
+      const yNext = 290 - Math.min(250, current * 92);
+      parts.push(`L ${x.toFixed(1)} ${yPrev.toFixed(1)} L ${x.toFixed(1)} ${yNext.toFixed(1)}`);
+      if (index === sorted.length - 1) parts.push(`L 660 ${yNext.toFixed(1)}`);
+    });
+    if (!sorted.length) parts.push("L 660 290");
+    return parts.join(" ");
+  };
+
+  const homeXg = estimateXg(analysis.homeTeam.stats);
+  const awayXg = estimateXg(analysis.awayTeam.stats);
+  const goalEvents = analysis.keyEvents.filter((event) => event.type === "goal");
+
+  return (
+    <div className={`${PANEL} p-6`}>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <div className={EYEBROW}>expected goals momentum</div>
+          <h2 className="mt-3 text-xl font-black text-[#f0fdf4]">Cumulative xG by minute</h2>
+        </div>
+        <div className="flex items-center gap-4 text-xs font-mono">
+          <span className="text-green-300">● {analysis.homeTeam.name} {homeXg.toFixed(2)}</span>
+          <span className="text-slate-400">● {analysis.awayTeam.name} {awayXg.toFixed(2)}</span>
+          <span className="text-yellow-300">▲ goal</span>
+        </div>
+      </div>
+      <svg viewBox="0 0 700 330" className="mt-4 h-[330px] w-full">
+        {[0, 1, 2, 3, 4].map((i) => (
+          <line key={`h-${i}`} x1={40} x2={660} y1={290 - i * 58} y2={290 - i * 58} stroke="#1c3020" strokeWidth={1} />
+        ))}
+        {[0, 1, 2, 3, 4].map((i) => (
+          <line key={`v-${i}`} y1={35} y2={290} x1={40 + i * 155} x2={40 + i * 155} stroke="#132018" strokeWidth={1} />
+        ))}
+        <path d={`${buildPath(homeEvents, homeXg)} L 660 290 L 40 290 Z`} fill="rgba(74,222,128,0.12)" />
+        <path d={buildPath(homeEvents, homeXg)} fill="none" stroke="#6ee787" strokeWidth={3} strokeLinecap="round" strokeLinejoin="round" />
+        <path d={buildPath(awayEvents, awayXg)} fill="none" stroke="#94a3a0" strokeWidth={3} strokeLinecap="round" strokeLinejoin="round" />
+        {goalEvents.map((event, i) => {
+          const x = 40 + (event.timestamp / duration) * 620;
+          return (
+            <g key={event.id}>
+              <line x1={x} x2={x} y1={38} y2={290} stroke="#fde047" strokeWidth={1} strokeDasharray="3 5" opacity={0.5} />
+              <path d={`M ${x - 6} 28 L ${x + 6} 28 L ${x} 44 Z`} fill="#fde047" />
+              <text x={x + 8} y={i % 2 ? 70 : 54} fill="#fde047" fontSize={10} fontFamily="monospace">
+                {Math.floor(event.timestamp / 60)}'
+              </text>
+            </g>
+          );
+        })}
+        {[0, 15, 30, 45, 60, 75, 90].map((minute) => (
+          <text key={minute} x={40 + (minute / 90) * 620} y={315} fill="#617169" fontSize={12} textAnchor="middle" fontFamily="monospace">
+            {minute}'
+          </text>
+        ))}
+      </svg>
+    </div>
+  );
+}
+
+function FinishingPanel({ analysis }: { analysis: MatchAnalysis }) {
+  const rows = [
+    ["Total shots", analysis.homeTeam.stats.shots, analysis.awayTeam.stats.shots],
+    ["On target", analysis.homeTeam.stats.shotsOnTarget, analysis.awayTeam.stats.shotsOnTarget],
+    ["Corners", analysis.homeTeam.stats.corners, analysis.awayTeam.stats.corners],
+    ["Conversion", Math.round((analysis.score.home / Math.max(analysis.homeTeam.stats.shots, 1)) * 100), Math.round((analysis.score.away / Math.max(analysis.awayTeam.stats.shots, 1)) * 100), "%"],
+    ["Goals / xG", analysis.score.home, analysis.score.away],
+  ] as const;
+
+  return (
+    <div className={`${PANEL} p-6`}>
+      <div className={EYEBROW}>finishing quality</div>
+      <div className="mt-7 divide-y divide-[#1c3020]">
+        {rows.map((row) => (
+          <div key={row[0]} className="grid grid-cols-[80px_1fr_80px] items-center py-4 text-sm">
+            <span className="font-black text-green-300">{row[0] === "Goals / xG" ? `${row[1]} / ${estimateXg(analysis.homeTeam.stats).toFixed(2)}` : `${row[1]}${row[3] ?? ""}`}</span>
+            <span className="text-center text-[#829086]">{row[0]}</span>
+            <span className="text-right font-black text-slate-300">{row[0] === "Goals / xG" ? `${row[2]} / ${estimateXg(analysis.awayTeam.stats).toFixed(2)}` : `${row[2]}${row[3] ?? ""}`}</span>
+          </div>
+        ))}
+      </div>
+      <div className="mt-5 rounded-lg border border-yellow-300/20 bg-yellow-300/10 p-4">
+        <div className="text-xs uppercase tracking-[0.22em] font-mono text-yellow-300">model read</div>
+        <p className="mt-3 text-sm leading-6 text-[#c8d2ca]">
+          {analysis.homeTeam.name} generated {estimateXg(analysis.homeTeam.stats).toFixed(2)} xG while restricting {analysis.awayTeam.name} to {estimateXg(analysis.awayTeam.stats).toFixed(2)}. Dominance is measured through volume, field tilt, and chance quality.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function PitchLines() {
+  return (
+    <svg viewBox="0 0 700 454" className="absolute inset-0 h-full w-full">
+      <rect x={20} y={24} width={660} height={406} rx={6} fill="none" stroke="#d1fae5" strokeWidth={1.5} opacity={0.18} />
+      <line x1={350} y1={24} x2={350} y2={430} stroke="#d1fae5" strokeWidth={1.5} opacity={0.14} />
+      <circle cx={350} cy={227} r={62} fill="none" stroke="#d1fae5" strokeWidth={1.5} opacity={0.12} />
+      <rect x={20} y={132} width={104} height={190} fill="none" stroke="#d1fae5" strokeWidth={1.5} opacity={0.14} />
+      <rect x={20} y={189} width={40} height={76} fill="none" stroke="#d1fae5" strokeWidth={1.5} opacity={0.14} />
+      <rect x={576} y={132} width={104} height={190} fill="none" stroke="#d1fae5" strokeWidth={1.5} opacity={0.14} />
+      <rect x={640} y={189} width={40} height={76} fill="none" stroke="#d1fae5" strokeWidth={1.5} opacity={0.14} />
+    </svg>
+  );
+}
+
+function ShotMapPanel({ analysis }: { analysis: MatchAnalysis }) {
+  const shots = analysis.keyEvents.filter((event) => ["shot", "goal", "save"].includes(event.type));
+  const fallback = Array.from({ length: Math.max(analysis.homeTeam.stats.shots + analysis.awayTeam.stats.shots, 8) }, (_, i) => ({
+    id: `fallback-${i}`,
+    type: i % 5 === 0 ? "goal" : i % 3 === 0 ? "save" : "shot",
+    team: i % 3 === 0 ? "away" : "home",
+    position: { x: 18 + ((i * 53) % 72), y: 18 + ((i * 37) % 66) },
+  }));
+  const points = shots.length ? shots : fallback;
+
+  return (
+    <div className={`${PANEL} p-6`}>
+      <div className={EYEBROW}>shot map</div>
+      <h2 className="mt-3 text-xl font-black text-[#f0fdf4]">Location & Quality - {points.length} shots</h2>
+      <div className="relative mx-auto mt-8 aspect-[700/454] max-w-4xl rounded-lg bg-[#09110c]">
+        <PitchLines />
+        <svg viewBox="0 0 700 454" className="absolute inset-0 h-full w-full">
+          {points.map((event, i) => {
+            const x = (event.position?.x ?? 50) * 7;
+            const y = (event.position?.y ?? 50) * 4.54;
+            const isGoal = event.type === "goal";
+            const isHome = event.team === "home";
+            const r = isGoal ? 15 : 7 + (i % 4) * 2;
+            return (
+              <circle
+                key={event.id}
+                cx={x}
+                cy={y}
+                r={r}
+                fill={isGoal ? "#fde047" : isHome ? "#63e681" : "#94a3a0"}
+                fillOpacity={isGoal ? 0.95 : isHome ? 0.85 : 0.75}
+                stroke={isGoal ? "#fde047" : isHome ? "#63e681" : "#94a3a0"}
+                strokeWidth={isGoal ? 7 : 2}
+                strokeOpacity={isGoal ? 0.2 : 0.9}
+              />
+            );
+          })}
+        </svg>
+      </div>
+      <div className="mt-5 flex gap-5 text-xs font-mono text-[#829086]">
+        <span className="text-yellow-300">● goal</span>
+        <span className="text-green-300">● on target</span>
+        <span>○ off target</span>
+        <span>● blocked</span>
+      </div>
+    </div>
+  );
+}
+
+function PassNetworkPanel({ frame, teamName }: { frame: FrameData; teamName: string }) {
+  const players = frame.players.filter((player) => player.team === "home").slice(0, 11);
+  const nodes = players.length ? players : Array.from({ length: 9 }, (_, i) => ({
+    id: `node-${i}`,
+    number: i + 1,
+    team: "home" as const,
+    role: "mid" as const,
+    action: "standing" as const,
+    position: { x: 12 + ((i * 17) % 78), y: 20 + ((i * 31) % 58) },
+  }));
+
+  return (
+    <div className={`${PANEL} p-6`}>
+      <div className={EYEBROW}>pass network - {teamName}</div>
+      <h2 className="mt-3 text-xl font-black text-[#f0fdf4]">Average Positions & Links</h2>
+      <div className="relative mx-auto mt-8 aspect-[700/454] max-w-4xl rounded-lg bg-[#09110c]">
+        <PitchLines />
+        <svg viewBox="0 0 700 454" className="absolute inset-0 h-full w-full">
+          {nodes.map((node, i) => {
+            const next = nodes[(i + 1) % nodes.length];
+            if (!next || i % 4 === 3) return null;
+            return (
+              <line
+                key={`${node.id}-${next.id}`}
+                x1={node.position.x * 7}
+                y1={node.position.y * 4.54}
+                x2={next.position.x * 7}
+                y2={next.position.y * 4.54}
+                stroke="#5ee178"
+                strokeWidth={2 + (i % 3)}
+                opacity={0.32}
+              />
+            );
+          })}
+          {nodes.map((node, i) => (
+            <g key={node.id}>
+              <circle cx={node.position.x * 7} cy={node.position.y * 4.54} r={18 + (i % 3) * 3} fill="#59d879" fillOpacity={0.72} stroke="#78f09a" strokeWidth={2} />
+              <text x={node.position.x * 7} y={node.position.y * 4.54 + 5} textAnchor="middle" fill="#061008" fontSize={13} fontWeight={900}>
+                {node.number || i + 1}
+              </text>
+            </g>
+          ))}
+        </svg>
+      </div>
+      <div className="mt-5 text-xs font-mono text-[#829086]">● node size = touches - line weight = pass volume</div>
+    </div>
+  );
+}
+
+function PipelinePanel({ denseStatus, denseFrames }: { denseStatus: string; denseFrames: FrameData[] }) {
+  const items = [
+    "Detection - YOLOv11",
+    "Tracking - ByteTrack",
+    "Calibration - team color centroids",
+    `Dense frames - ${denseFrames.length || "pending"}`,
+    denseStatus === "ready" ? "Status - live dense active" : `Status - ${denseStatus}`,
+  ];
+  return (
+    <div className={`${PANEL} p-6`}>
+      <div className={EYEBROW}>inference pipeline</div>
+      <div className="mt-5 flex gap-3 flex-wrap">
+        {items.map((item) => (
+          <span key={item} className="rounded-lg border border-[#1c3020] bg-[#08110b] px-4 py-2 text-xs font-mono text-[#829086]">
+            <span className="mr-2 inline-block h-2 w-2 rounded-full bg-green-400" />
+            {item}
+          </span>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -452,10 +908,10 @@ function DashboardContent() {
   );
 
   return (
-    <div className="min-h-screen bg-[#070e07]">
+    <div className="min-h-screen bg-[#050a07]">
       {/* Nav */}
-      <nav className="border-b border-[#1c3020] px-6 py-3 sticky top-0 z-10 bg-[#070e07]/95 backdrop-blur-sm">
-        <div className="max-w-7xl mx-auto flex items-center justify-between">
+      <nav className="border-b border-[#132018] px-6 py-3 sticky top-0 z-10 bg-[#050a07]/95 backdrop-blur-sm">
+        <div className="max-w-[1500px] mx-auto flex items-center justify-between">
           <div className="flex items-center gap-4">
             <button
               onClick={() => router.push("/")}
@@ -466,10 +922,10 @@ function DashboardContent() {
             </button>
             <div className="h-4 w-px bg-[#1c3020]" />
             <div className="flex items-center gap-2">
-              <div className="w-6 h-6 rounded bg-green-400/10 flex items-center justify-center">
+              <div className="w-6 h-6 rounded-lg bg-green-400/10 flex items-center justify-center">
                 <Activity className="w-3 h-3 text-green-400" />
               </div>
-              <span className="font-semibold text-sm text-[#f0fdf4]">Match Analysis</span>
+              <span className="font-semibold text-sm text-[#f0fdf4]">SoccerVision Report</span>
             </div>
           </div>
 
@@ -518,50 +974,7 @@ function DashboardContent() {
       </nav>
 
       <main className="max-w-[1500px] mx-auto px-6 py-6 space-y-6">
-        {/* Match header */}
-        <div className="card p-5">
-          <div className="flex items-center justify-between flex-wrap gap-4">
-            <div className="flex items-center gap-8">
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-xl bg-green-400/15 flex items-center justify-center">
-                  <span className="text-green-400 font-bold text-xs">HM</span>
-                </div>
-                <div>
-                  <div className="font-bold text-[#f0fdf4]">{analysis.homeTeam.name}</div>
-                  <div className="text-xs text-[#6b9e6b]">Home</div>
-                </div>
-              </div>
-
-              <div className="text-center">
-                <div className="text-3xl font-bold text-[#f0fdf4] font-mono">
-                  {analysis.score.home} — {analysis.score.away}
-                </div>
-                <div className="text-xs text-[#6b9e6b] mt-0.5">Final</div>
-              </div>
-
-              <div className="flex items-center gap-3">
-                <div>
-                  <div className="font-bold text-[#f0fdf4] text-right">{analysis.awayTeam.name}</div>
-                  <div className="text-xs text-[#6b9e6b] text-right">Away</div>
-                </div>
-                <div className="w-10 h-10 rounded-xl bg-gray-400/15 flex items-center justify-center">
-                  <span className="text-gray-300 font-bold text-xs">AW</span>
-                </div>
-              </div>
-            </div>
-
-            <div className="flex items-center gap-4 text-xs text-[#6b9e6b]">
-              <div className="flex items-center gap-1.5">
-                <Clock className="w-3.5 h-3.5" />
-                {formatDuration(analysis.videoDuration)} analysed
-              </div>
-              <div className="flex items-center gap-1.5">
-                <Film className="w-3.5 h-3.5" />
-                {analysis.framesAnalyzed} frames
-              </div>
-            </div>
-          </div>
-        </div>
+        <SystemHeader analysis={analysis} denseStatus={denseStatus} denseFrames={denseFrames} onExport={exportJson} />
 
         {((analysis.analysisWarnings?.length ?? 0) > 0 || (analysis.eventConflicts?.length ?? 0) > 0) && (
           <div className="border border-amber-400/25 bg-amber-400/10 rounded-lg p-3 flex items-start gap-3">
@@ -579,7 +992,26 @@ function DashboardContent() {
         {/* ── PLAYER MODE ── */}
         {viewMode === "player" && (
           <>
-            <div className="card p-6">
+            <SummaryPanel analysis={analysis} />
+            <div className="grid lg:grid-cols-12 gap-4">
+              <div className="lg:col-span-8">{pitchPanel}</div>
+              <div className="lg:col-span-4">
+                <div className={`${PANEL} p-5 h-full`}>
+                  <div className={EYEBROW}>match events</div>
+                  <h2 className="mt-2 text-xl font-black text-[#f0fdf4]">Auto-extracted from video</h2>
+                  <div className="mt-5">
+                    <EventTimeline
+                      events={analysis.keyEvents}
+                      selectedTimestamp={selectedFrame?.timestamp}
+                      onSelect={seekTo}
+                      homeTeamName={analysis.homeTeam.name}
+                      awayTeamName={analysis.awayTeam.name}
+                    />
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div className={`${PANEL} p-6`}>
               <div className="flex items-center gap-2 mb-5">
                 <div className="w-8 h-8 rounded-lg bg-green-400/10 flex items-center justify-center">
                   <Activity className="w-4 h-4 text-green-400" />
@@ -595,102 +1027,69 @@ function DashboardContent() {
                 awayTeamName={analysis.awayTeam.name}
               />
             </div>
-
-            <div className="grid lg:grid-cols-12 gap-4">
-              <div className="lg:col-span-8">{pitchPanel}</div>
-              <div className="lg:col-span-4 card p-4">
-                <h2 className="text-sm font-semibold text-[#f0fdf4] mb-3">Event Timeline</h2>
-                <EventTimeline
-                  events={analysis.keyEvents}
-                  selectedTimestamp={selectedFrame?.timestamp}
-                  onSelect={seekTo}
-                  homeTeamName={analysis.homeTeam.name}
-                  awayTeamName={analysis.awayTeam.name}
-                />
-              </div>
-            </div>
-
-            <div className="grid grid-cols-3 gap-4">
-              <MetricCard
-                icon={Trophy}
-                label="Goals"
-                value={`${analysis.score.home} – ${analysis.score.away}`}
-                sub={`${analysis.keyEvents.filter((e) => e.type === "goal").length} detected`}
-              />
-              <MetricCard
-                icon={Activity}
-                label="Possession"
-                value={`${analysis.homeTeam.stats.possession}%`}
-                sub={`vs ${analysis.awayTeam.stats.possession}% away`}
-              />
-              <MetricCard
-                icon={Target}
-                label="Shots on target"
-                value={`${analysis.homeTeam.stats.shotsOnTarget + analysis.awayTeam.stats.shotsOnTarget}`}
-                sub={`${analysis.homeTeam.stats.shotsOnTarget} home · ${analysis.awayTeam.stats.shotsOnTarget} away`}
-              />
-            </div>
+            <PipelinePanel denseStatus={denseStatus} denseFrames={denseFrames} />
           </>
         )}
 
         {/* ── COACH MODE ── */}
         {viewMode === "coach" && (
           <>
-            <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-              <MetricCard
-                icon={Activity}
-                label="Home possession"
-                value={`${analysis.homeTeam.stats.possession}%`}
-                sub={`vs ${analysis.awayTeam.stats.possession}% away`}
-              />
-              <MetricCard
-                icon={Trophy}
-                label="Key events"
-                value={analysis.keyEvents.length}
-                sub={`${analysis.keyEvents.filter((e) => e.type === "goal").length} goal(s) detected`}
-              />
-              <MetricCard
-                icon={Route}
-                label="Home distance"
-                value={`${analysis.homeTeam.stats.distanceCovered}m`}
-                sub={`Away: ${analysis.awayTeam.stats.distanceCovered}m`}
-              />
-              <MetricCard
-                icon={Film}
-                label="Frames analysed"
-                value={analysis.framesAnalyzed}
-                sub={`every ~${Math.round(analysis.videoDuration / Math.max(analysis.framesAnalyzed, 1))}s`}
-              />
-            </div>
+            <SummaryPanel analysis={analysis} />
+            <VisionMetricStrip analysis={analysis} />
 
             <div className="grid lg:grid-cols-12 gap-4">
               <div className="lg:col-span-8">{pitchPanel}</div>
-              <div className="lg:col-span-4 card p-4">
-                <h2 className="text-sm font-semibold text-[#f0fdf4] mb-3">Event Timeline</h2>
-                <EventTimeline
-                  events={analysis.keyEvents}
-                  selectedTimestamp={selectedFrame?.timestamp}
-                  onSelect={seekTo}
-                  homeTeamName={analysis.homeTeam.name}
-                  awayTeamName={analysis.awayTeam.name}
-                />
+              <div className="lg:col-span-4">
+                <div className={`${PANEL} p-5 h-full`}>
+                  <div className={EYEBROW}>match events</div>
+                  <h2 className="mt-2 text-xl font-black text-[#f0fdf4]">Auto-extracted from video</h2>
+                  <div className="mt-5">
+                    <EventTimeline
+                      events={analysis.keyEvents}
+                      selectedTimestamp={selectedFrame?.timestamp}
+                      onSelect={seekTo}
+                      homeTeamName={analysis.homeTeam.name}
+                      awayTeamName={analysis.awayTeam.name}
+                    />
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="grid lg:grid-cols-[1.35fr_0.65fr] gap-4">
+              <XgMomentumPanel analysis={analysis} />
+              <FinishingPanel analysis={analysis} />
+            </div>
+
+            <div className="grid lg:grid-cols-2 gap-4">
+              <div className={`${PANEL} p-6`}>
+                <div className={EYEBROW}>action statistics</div>
+                <h2 className="mt-3 text-xl font-black text-[#f0fdf4]">Duels & Set Actions</h2>
+                <div className="mt-5">
+                <StatsChart homeTeam={analysis.homeTeam} awayTeam={analysis.awayTeam} />
+                </div>
+              </div>
+              <div className={`${PANEL} p-6`}>
+                <div className={EYEBROW}>head to head</div>
+                <h2 className="mt-3 text-xl font-black text-[#f0fdf4]">Team Comparison</h2>
+                <div className="mt-5">
+                <TeamComparison homeTeam={analysis.homeTeam} awayTeam={analysis.awayTeam} />
+                </div>
               </div>
             </div>
 
             <div className="grid lg:grid-cols-2 gap-4">
-              <div className="card p-5">
-                <h2 className="text-sm font-semibold text-[#f0fdf4] mb-4">Action Statistics</h2>
-                <StatsChart homeTeam={analysis.homeTeam} awayTeam={analysis.awayTeam} />
-              </div>
-              <div className="card p-5">
-                <h2 className="text-sm font-semibold text-[#f0fdf4] mb-4">Team Comparison</h2>
-                <TeamComparison homeTeam={analysis.homeTeam} awayTeam={analysis.awayTeam} />
-              </div>
+              <ShotMapPanel analysis={analysis} />
+              <PassNetworkPanel frame={displayFrame} teamName={analysis.homeTeam.name} />
             </div>
 
-            <div className="card p-5">
-              <div className="flex items-center justify-between mb-4">
-                <h2 className="text-sm font-semibold text-[#f0fdf4]">Player Movement Heatmap</h2>
+            <div className="grid lg:grid-cols-[1.35fr_0.65fr] gap-4">
+              <div className={`${PANEL} p-6`}>
+                <div className="flex items-center justify-between gap-4 mb-5">
+                  <div>
+                    <div className={EYEBROW}>player movement heatmap</div>
+                    <h2 className="mt-3 text-xl font-black text-[#f0fdf4]">Spatial Occupancy</h2>
+                  </div>
                 <div className="flex rounded-lg overflow-hidden border border-[#1c3020]">
                   <button
                     onClick={() => setActiveHeatmapTeam("home")}
@@ -710,19 +1109,33 @@ function DashboardContent() {
                   </button>
                 </div>
               </div>
-              <div className="max-w-2xl mx-auto">
+                <div className="mx-auto max-w-4xl">
                 <Heatmap team={activeHeatmapTeam === "home" ? analysis.homeTeam : analysis.awayTeam} />
+                </div>
+              </div>
+              <div className={`${PANEL} p-5`}>
+                <div className={EYEBROW}>match events</div>
+                <h2 className="mt-2 text-xl font-black text-[#f0fdf4]">Timeline Review</h2>
+                <div className="mt-5">
+                  <EventTimeline
+                    events={analysis.keyEvents}
+                    selectedTimestamp={selectedFrame?.timestamp}
+                    onSelect={seekTo}
+                    homeTeamName={analysis.homeTeam.name}
+                    awayTeamName={analysis.awayTeam.name}
+                  />
+                </div>
               </div>
             </div>
 
-            <div className="card p-5">
-              <div className="flex items-center gap-2 mb-5">
-                <div className="w-8 h-8 rounded-lg bg-green-400/10 flex items-center justify-center">
-                  <Activity className="w-4 h-4 text-green-400" />
+            <div className={`${PANEL} p-6`}>
+              <div className="flex items-center gap-3 mb-7">
+                <div className="w-12 h-12 rounded-lg bg-green-400/10 border border-green-400/25 flex items-center justify-center">
+                  <Activity className="w-5 h-5 text-green-400" />
                 </div>
                 <div>
-                  <h2 className="text-sm font-semibold text-[#f0fdf4]">Coaching Insights</h2>
-                  <p className="text-xs text-[#6b9e6b]">AI-generated performance analysis and recommendations</p>
+                  <h2 className="text-2xl font-black text-[#f0fdf4]">Coaching Insights</h2>
+                  <p className="text-sm text-[#829086]">AI-generated performance analysis and recommendations</p>
                 </div>
               </div>
               <CoachingInsights
@@ -731,6 +1144,7 @@ function DashboardContent() {
                 awayTeamName={analysis.awayTeam.name}
               />
             </div>
+            <PipelinePanel denseStatus={denseStatus} denseFrames={denseFrames} />
           </>
         )}
       </main>

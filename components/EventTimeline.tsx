@@ -63,10 +63,9 @@ export default function EventTimeline({
   }
 
   return (
-    <div className="flex flex-col gap-1 overflow-y-auto max-h-[520px] pr-1">
+    <div className="relative overflow-y-auto max-h-[640px] pr-1">
       {sorted.map((event) => {
         const cfg = EVENT_CONFIG[event.type] ?? EVENT_CONFIG.pass;
-        const Icon = cfg.icon;
         const isSelected =
           selectedTimestamp !== undefined &&
           Math.abs(event.timestamp - selectedTimestamp) < 10;
@@ -82,44 +81,30 @@ export default function EventTimeline({
           <button
             key={event.id}
             onClick={() => onSelect?.(event.timestamp)}
-            className={`w-full text-left flex items-start gap-3 p-3 rounded-lg transition-colors ${
+            className={`relative w-full text-left grid grid-cols-[18px_58px_1fr_auto] gap-3 px-1 py-3 transition-colors ${
               isSelected
-                ? "bg-green-400/10 border border-green-400/30"
-                : "hover:bg-[#142014] border border-transparent"
+                ? "rounded-lg bg-green-400/10"
+                : "hover:bg-[#101a12]"
             }`}
           >
-            <div className="text-xs font-mono text-[#6b9e6b] w-10 pt-0.5 flex-shrink-0">
+            <div className="relative flex justify-center">
+              <span className={`mt-1 h-3 w-3 rounded-full ${event.type === "goal" ? "bg-yellow-300" : event.team === "home" ? "bg-green-400" : "bg-[#7c8a82]"}`} />
+              <span className="absolute top-5 bottom-[-18px] w-px bg-[#1c3020]" />
+            </div>
+
+            <div className="pt-0.5 text-sm font-black font-mono text-[#c8d2ca]">
               {formatTime(event.timestamp)}
             </div>
 
-            <div className={`w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0 ${cfg.bgColor}`}>
-              <Icon className={`w-3.5 h-3.5 ${cfg.color}`} />
-            </div>
-
             <div className="flex-1 min-w-0">
-              <div className="flex items-center gap-2 mb-0.5">
-                <span className={`text-xs font-semibold uppercase tracking-wide ${cfg.color}`}>
-                  {event.type.replace("-", " ")}
-                </span>
-                {teamLabel && (
-                  <span
-                    className={`text-xs px-1.5 py-0.5 rounded-full ${
-                      event.team === "home"
-                        ? "bg-green-400/15 text-green-400"
-                        : "bg-gray-400/15 text-gray-300"
-                    }`}
-                  >
-                    {teamLabel}
-                  </span>
-                )}
-              </div>
-              <p className="text-xs text-[#6b9e6b] leading-relaxed">{event.description}</p>
+              <p className="text-sm text-[#c8d2ca] leading-relaxed">{event.description}</p>
+              {teamLabel && <p className="mt-1 text-xs text-[#6f8175]">{teamLabel}</p>}
               {event.semanticLabel && (
                 <p className="text-xs text-green-400/80 mt-1">{event.semanticLabel.replaceAll("_", " ")}</p>
               )}
               {event.evidenceUsed && event.evidenceUsed.length > 0 && (
-                <p className="text-xs text-[#6b9e6b]/70 mt-1">
-                  Evidence: {event.evidenceUsed.slice(0, 2).join("; ")}
+                <p className="text-xs font-mono text-[#617169] mt-1">
+                  vision conf · {event.confidence.toFixed(2)}
                 </p>
               )}
               {((event.conflicts?.length ?? 0) > 0 || event.pipelineFlag) && (
@@ -129,12 +114,9 @@ export default function EventTimeline({
               )}
             </div>
 
-            <div className="flex-shrink-0 text-right">
-              <div className="text-xs text-[#6b9e6b]">{Math.round(event.confidence * 100)}%</div>
-              {event.isKeyMoment && (
-                <div className="text-xs text-green-400 mt-0.5">Key</div>
-              )}
-            </div>
+            <span className={`mt-0.5 rounded-md px-2 py-1 text-[10px] font-mono uppercase ${cfg.bgColor} ${cfg.color}`}>
+              {event.type.replace("-", " ")}
+            </span>
           </button>
         );
       })}

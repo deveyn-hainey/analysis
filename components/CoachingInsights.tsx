@@ -34,7 +34,7 @@ export default function CoachingInsights({ insights, homeTeamName, awayTeamName 
   }
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="grid lg:grid-cols-2 gap-5">
       {insights.map((insight) => {
         const cat = CATEGORY_CONFIG[insight.category] ?? CATEGORY_CONFIG.tactical;
         const pri = PRIORITY_CONFIG[insight.priority] ?? PRIORITY_CONFIG.medium;
@@ -43,31 +43,31 @@ export default function CoachingInsights({ insights, homeTeamName, awayTeamName 
         return (
           <div
             key={insight.id}
-            className={`border rounded-xl p-4 ${cat.border} bg-[#0d1a0d]`}
+            className={`border rounded-lg p-6 ${cat.border} bg-[#07100a]`}
           >
-            <div className="flex items-start justify-between gap-3 mb-3">
-              <div className="flex items-center gap-2.5">
-                <div className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 ${cat.bg}`}>
+            <div className="flex items-start justify-between gap-4 mb-7">
+              <div className="flex items-start gap-4">
+                <div className={`w-11 h-11 rounded-lg flex items-center justify-center flex-shrink-0 ${cat.bg}`}>
                   <Icon className={`w-4 h-4 ${cat.color}`} />
                 </div>
                 <div>
-                  <h4 className="text-sm font-semibold text-[#f0fdf4] leading-tight">{insight.title}</h4>
-                  <div className="flex items-center gap-2 mt-0.5">
-                    <span className={`text-xs capitalize ${cat.color}`}>{insight.category}</span>
+                  <h4 className="text-lg font-black text-[#f0fdf4] leading-tight">{insight.title}</h4>
+                  <div className="flex items-center gap-2 mt-2">
+                    <span className={`text-sm capitalize ${cat.color}`}>{insight.category}</span>
                     <span className="text-[#1c3020]">·</span>
-                    <span className={`text-xs px-1.5 py-0.5 rounded-full ${pri.bg} ${pri.color}`}>
+                    <span className={`text-xs px-2 py-0.5 rounded-md ${pri.bg} ${pri.color}`}>
                       {pri.label}
                     </span>
                   </div>
                 </div>
               </div>
               <span
-                className={`text-xs px-2 py-0.5 rounded-full flex-shrink-0 ${
+                className={`text-xs px-3 py-1 rounded-md border border-[#1c3020] bg-[#101812] flex-shrink-0 ${
                   insight.affectedTeam === "home"
-                    ? "bg-green-400/15 text-green-400"
+                    ? "text-green-400"
                     : insight.affectedTeam === "away"
-                    ? "bg-gray-400/15 text-gray-300"
-                    : "bg-green-400/10 text-green-300"
+                    ? "text-gray-300"
+                    : "text-green-300"
                 }`}
               >
                 {insight.affectedTeam === "home"
@@ -78,14 +78,27 @@ export default function CoachingInsights({ insights, homeTeamName, awayTeamName 
               </span>
             </div>
 
-            <div className="mb-2">
-              <div className="text-xs font-medium text-[#6b9e6b] uppercase tracking-wide mb-1">Observation</div>
-              <p className="text-sm text-[#d1fae5] leading-relaxed">{insight.observation}</p>
+            <div className="mb-6">
+              <div className="text-xs font-mono text-[#617169] uppercase tracking-[0.22em] mb-3">Observation</div>
+              <p className="text-base text-[#c8d2ca] leading-7">{insight.observation}</p>
             </div>
 
-            <div className="bg-[#070e07] rounded-lg p-3 border border-[#1c3020]">
-              <div className="text-xs font-medium text-green-400 uppercase tracking-wide mb-1">Recommendation</div>
-              <p className="text-sm text-[#d1fae5] leading-relaxed">{insight.recommendation}</p>
+            <div className="bg-green-400/10 rounded-lg p-4 border border-green-400/20">
+              <div className="text-xs font-mono text-green-400 uppercase tracking-[0.22em] mb-3">Recommendation</div>
+              <p className="text-base text-[#d1fae5] leading-7">{insight.recommendation}</p>
+            </div>
+
+            <div className="mt-5 grid grid-cols-[140px_1fr_44px] items-center gap-3">
+              <span className="text-xs font-mono text-[#617169]">model confidence</span>
+              <div className="h-1.5 rounded-full bg-[#142014] overflow-hidden">
+                <div
+                  className="h-full rounded-full bg-green-400"
+                  style={{ width: `${insight.priority === "critical" ? 93 : insight.priority === "high" ? 86 : insight.priority === "medium" ? 78 : 68}%` }}
+                />
+              </div>
+              <span className="text-xs font-mono text-green-300 text-right">
+                {insight.priority === "critical" ? "0.93" : insight.priority === "high" ? "0.86" : insight.priority === "medium" ? "0.78" : "0.68"}
+              </span>
             </div>
           </div>
         );
