@@ -32,13 +32,144 @@ function formatDuration(s: number) {
   return `${m}:${sec.toString().padStart(2, "0")}`;
 }
 
+// Linear interpolation between two sampled frames for smooth overlay motion.
+// Players are matched by team + jersey number; unmatched players don't interpolate.
+function interpolateFrame(a: FrameData, b: FrameData, alpha: number): FrameData {
+  const players = a.players.map((player) => {
+    const match =
+      b.players.find((p) => p.team === player.team && p.number === player.number) ??
+      b.players.find((p) => p.team === player.team);
+    if (!match) return player;
+    return {
+      ...player,
+      position: {
+        x: player.position.x + (match.position.x - player.position.x) * alpha,
+        y: player.position.y + (match.position.y - player.position.y) * alpha,
+      },
+    };
+  });
+
+  const ballPosition =
+    a.ballPosition && b.ballPosition
+      ? {
+          x: a.ballPosition.x + (b.ballPosition.x - a.ballPosition.x) * alpha,
+          y: a.ballPosition.y + (b.ballPosition.y - a.ballPosition.y) * alpha,
+        }
+      : a.ballPosition;
+
+  return { ...a, players, ballPosition };
+}
+
 type ViewMode = "coach" | "player";
+
+// SVG overlay rendered on top of the video element — draws team-coloured ellipses
+// at players' feet (matching the supervision EllipseAnnotator style) plus a ball dot.
+function TrackingOverlaySvg({ frame }: { frame: FrameData }) {
+  const HOME = "#3b82f6";
+  const AWAY = "#ef4444";
+
+  return (
+    <svg
+      className="absolute inset-0 w-full h-full pointer-events-none"
+      viewBox="0 0 1280 720"
+      preserveAspectRatio="none"
+    >
+      {frame.players.map((player) => {
+        const cx = (player.position.x / 100) * 1280;
+        const cy = (player.position.y / 100) * 720;
+        const color = player.team === "home" ? HOME : AWAY;
+        return (
+          <g key={player.id}>
+            {/* Foot ellipse — matches supervision EllipseAnnotator */}
+            <ellipse
+              cx={cx}
+              cy={cy + 20}
+              rx={26}
+              ry={8}
+              fill="none"
+              stroke={color}
+              strokeWidth={2.5}
+              strokeOpacity={0.9}
+            />
+            {/* Body dot */}
+            <circle
+              cx={cx}
+              cy={cy}
+              r={11}
+              fill={color}
+              fillOpacity={0.85}
+              stroke="#000"
+              strokeWidth={1.5}
+            />
+            {/* Jersey number */}
+            {player.number > 0 && (
+              <text
+                x={cx}
+                y={cy + 4}
+                textAnchor="middle"
+                fontSize={8}
+                fontWeight="700"
+                fill="#fff"
+                fontFamily="monospace"
+              >
+                {player.number}
+              </text>
+            )}
+            {/* #number label above */}
+            <text
+              x={cx}
+              y={cy - 16}
+              textAnchor="middle"
+              fontSize={11}
+              fontWeight="700"
+              fill="#fff"
+              fontFamily="monospace"
+              stroke="#000"
+              strokeWidth={2.5}
+              paintOrder="stroke"
+            >
+              #{player.number > 0 ? player.number : "?"}
+            </text>
+          </g>
+        );
+      })}
+      {/* Referees */}
+      {frame.referees?.map((pos, i) => (
+        <ellipse
+          key={`ref-${i}`}
+          cx={(pos.x / 100) * 1280}
+          cy={(pos.y / 100) * 720 + 20}
+          rx={26}
+          ry={8}
+          fill="none"
+          stroke="#fbbf24"
+          strokeWidth={2.5}
+        />
+      ))}
+      {/* Ball */}
+      {frame.ballPosition && (
+        <g>
+          <circle
+            cx={(frame.ballPosition.x / 100) * 1280}
+            cy={(frame.ballPosition.y / 100) * 720}
+            r={8}
+            fill="#fbbf24"
+            stroke="#000"
+            strokeWidth={1.5}
+          />
+        </g>
+      )}
+    </svg>
+  );
+}
 
 function DashboardContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [analysis, setAnalysis] = useState<MatchAnalysis | null>(null);
   const [selectedFrame, setSelectedFrame] = useState<FrameData | null>(null);
+  // Smoothly interpolated frame — updated at ~30fps via RAF for fluid overlay motion
+  const [liveFrame, setLiveFrame] = useState<FrameData | null>(null);
   const [activeHeatmapTeam, setActiveHeatmapTeam] = useState<"home" | "away">("home");
   const [viewMode, setViewMode] = useState<ViewMode>("coach");
   const [pitchView, setPitchView] = useState<"frame" | "tactical">("tactical");
@@ -50,21 +181,46 @@ function DashboardContent() {
     setVideoUrl(url);
   }, []);
 
-  // Keep the tactical field in sync with video playback — as the video plays,
-  // find the nearest sampled frame and update the player/ball overlay.
+  // RAF loop: reads video.currentTime at ~30fps, interpolates between the two
+  // surrounding sampled frames, and drives both the SVG overlay and SoccerField.
   useEffect(() => {
     const video = videoRef.current;
-    if (!video || !analysis) return;
-    const onTimeUpdate = () => {
-      const t = video.currentTime;
-      const closest = analysis.frames.reduce((best, f) =>
-        Math.abs(f.timestamp - t) < Math.abs(best.timestamp - t) ? f : best
-      );
-      setSelectedFrame(closest);
+    if (!video || !analysis || !videoUrl) return;
+
+    const sorted = [...analysis.frames].sort((a, b) => a.timestamp - b.timestamp);
+    let rafId: number;
+    let lastWall = 0;
+
+    const tick = () => {
+      const now = performance.now();
+      if (now - lastWall >= 33) { // ~30fps
+        lastWall = now;
+        const t = video.currentTime;
+
+        // Find the two frames surrounding the current video time
+        let prevIdx = 0;
+        for (let i = 0; i < sorted.length - 1; i++) {
+          if (sorted[i].timestamp <= t) prevIdx = i;
+          else break;
+        }
+        const prev = sorted[prevIdx];
+        const next = sorted[Math.min(prevIdx + 1, sorted.length - 1)];
+
+        setSelectedFrame(prev);
+
+        if (prev === next || next.timestamp <= prev.timestamp) {
+          setLiveFrame(prev);
+        } else {
+          const alpha = Math.min(1, (t - prev.timestamp) / (next.timestamp - prev.timestamp));
+          setLiveFrame(interpolateFrame(prev, next, alpha));
+        }
+      }
+      rafId = requestAnimationFrame(tick);
     };
-    video.addEventListener("timeupdate", onTimeUpdate);
-    return () => video.removeEventListener("timeupdate", onTimeUpdate);
-  }, [analysis]);
+
+    rafId = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(rafId);
+  }, [analysis, videoUrl]);
 
   useEffect(() => {
     const stored = sessionStorage.getItem("matchAnalysis");
@@ -72,7 +228,10 @@ function DashboardContent() {
       try {
         const data = JSON.parse(stored) as MatchAnalysis;
         setAnalysis(data);
-        if (data.frames.length > 0) setSelectedFrame(data.frames[0]);
+        if (data.frames.length > 0) {
+          setSelectedFrame(data.frames[0]);
+          setLiveFrame(data.frames[0]);
+        }
       } catch {
         router.push("/");
       }
@@ -93,6 +252,7 @@ function DashboardContent() {
   }
 
   const currentFrame = selectedFrame ?? analysis.frames[0];
+  const displayFrame = liveFrame ?? currentFrame;
   const frameImage = currentFrame ? frameImageStore.get(currentFrame.frameIndex) : null;
 
   const seekTo = (timestamp: number) => {
@@ -100,6 +260,7 @@ function DashboardContent() {
       Math.abs(f.timestamp - timestamp) < Math.abs(best.timestamp - timestamp) ? f : best
     );
     setSelectedFrame(closest);
+    setLiveFrame(closest);
     if (videoRef.current && videoUrl) {
       videoRef.current.currentTime = timestamp;
     }
@@ -115,17 +276,19 @@ function DashboardContent() {
     URL.revokeObjectURL(url);
   };
 
-  // Shared video+tactical / frame-by-frame panel used in both view modes.
+  // Shared pitch panel — Tactical shows video+overlay side-by-side with the
+  // abstract field (both driven by the interpolated liveFrame), Frame shows
+  // the raw extracted image with dot overlay for precise frame inspection.
   const pitchPanel = (
     <div className="card p-4">
       <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
         <div>
           <h2 className="text-sm font-semibold text-[#f0fdf4]">
-            {pitchView === "tactical" ? "Video + Tactical" : "Frame View"}
+            {pitchView === "tactical" ? "Tracking + Tactical" : "Frame View"}
           </h2>
           {pitchView === "tactical" && videoUrl && (
             <p className="text-xs text-[#6b9e6b] mt-0.5">
-              Tactical field syncs to video playback
+              Player overlay and field sync to playback in real time
             </p>
           )}
           {pitchView === "frame" && currentFrame && (
@@ -152,28 +315,32 @@ function DashboardContent() {
       </div>
 
       {pitchView === "tactical" && (
-        <div className="space-y-3">
-          {videoUrl ? (
-            <>
+        videoUrl ? (
+          // Side-by-side: video+tracking overlay LEFT, abstract tactical field RIGHT
+          <div className="grid grid-cols-5 gap-2">
+            <div className="col-span-3 relative rounded-lg overflow-hidden bg-black">
               <video
                 ref={videoRef}
                 src={videoUrl}
                 controls
-                className="w-full rounded-lg"
-                style={{ maxHeight: 240 }}
+                className="w-full block"
               />
-              <p className="text-xs text-[#6b9e6b]">
-                Click an event in the timeline to jump · field updates as video plays
-              </p>
-            </>
-          ) : (
+              <TrackingOverlaySvg frame={displayFrame} />
+            </div>
+            <div className="col-span-2 flex flex-col justify-center">
+              <SoccerField frame={displayFrame} />
+            </div>
+          </div>
+        ) : (
+          // No video — show placeholder + full-width tactical field
+          <div className="space-y-3">
             <div className="border border-dashed border-[#1c3020] rounded-lg flex items-center justify-center gap-3 text-[#6b9e6b] text-xs py-5">
               <Film className="w-4 h-4" />
-              Upload a clip to enable video playback and live tracking
+              Upload a clip to enable live tracking overlay
             </div>
-          )}
-          {currentFrame && <SoccerField frame={currentFrame} />}
-        </div>
+            {currentFrame && <SoccerField frame={currentFrame} />}
+          </div>
+        )
       )}
 
       {pitchView === "frame" && (
@@ -231,14 +398,11 @@ function DashboardContent() {
           </div>
 
           <div className="flex items-center gap-3">
-            {/* Coach / Player toggle */}
             <div className="flex rounded-lg border border-[#1c3020] overflow-hidden text-xs">
               <button
                 onClick={() => setViewMode("coach")}
                 className={`px-3 py-1.5 font-medium transition-colors ${
-                  viewMode === "coach"
-                    ? "bg-green-400 text-black"
-                    : "text-[#6b9e6b] hover:text-[#f0fdf4]"
+                  viewMode === "coach" ? "bg-green-400 text-black" : "text-[#6b9e6b] hover:text-[#f0fdf4]"
                 }`}
               >
                 Coach
@@ -246,9 +410,7 @@ function DashboardContent() {
               <button
                 onClick={() => setViewMode("player")}
                 className={`px-3 py-1.5 font-medium transition-colors ${
-                  viewMode === "player"
-                    ? "bg-green-400 text-black"
-                    : "text-[#6b9e6b] hover:text-[#f0fdf4]"
+                  viewMode === "player" ? "bg-green-400 text-black" : "text-[#6b9e6b] hover:text-[#f0fdf4]"
                 }`}
               >
                 Player
@@ -341,7 +503,6 @@ function DashboardContent() {
         {/* ── PLAYER MODE ── */}
         {viewMode === "player" && (
           <>
-            {/* Insights first and prominent */}
             <div className="card p-6">
               <div className="flex items-center gap-2 mb-5">
                 <div className="w-8 h-8 rounded-lg bg-green-400/10 flex items-center justify-center">
@@ -359,12 +520,8 @@ function DashboardContent() {
               />
             </div>
 
-            {/* Video + Pitch + Timeline */}
             <div className="grid lg:grid-cols-5 gap-4">
-              <div className="lg:col-span-3">
-                {pitchPanel}
-              </div>
-
+              <div className="lg:col-span-3">{pitchPanel}</div>
               <div className="lg:col-span-2 card p-4">
                 <h2 className="text-sm font-semibold text-[#f0fdf4] mb-3">Event Timeline</h2>
                 <EventTimeline
@@ -377,7 +534,6 @@ function DashboardContent() {
               </div>
             </div>
 
-            {/* Quick stats */}
             <div className="grid grid-cols-3 gap-4">
               <MetricCard
                 icon={Trophy}
@@ -404,7 +560,6 @@ function DashboardContent() {
         {/* ── COACH MODE ── */}
         {viewMode === "coach" && (
           <>
-            {/* KPI row */}
             <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
               <MetricCard
                 icon={Activity}
@@ -432,12 +587,8 @@ function DashboardContent() {
               />
             </div>
 
-            {/* Video + Pitch + Timeline */}
             <div className="grid lg:grid-cols-5 gap-4">
-              <div className="lg:col-span-3">
-                {pitchPanel}
-              </div>
-
+              <div className="lg:col-span-3">{pitchPanel}</div>
               <div className="lg:col-span-2 card p-4">
                 <h2 className="text-sm font-semibold text-[#f0fdf4] mb-3">Event Timeline</h2>
                 <EventTimeline
@@ -450,7 +601,6 @@ function DashboardContent() {
               </div>
             </div>
 
-            {/* Stats + Comparison */}
             <div className="grid lg:grid-cols-2 gap-4">
               <div className="card p-5">
                 <h2 className="text-sm font-semibold text-[#f0fdf4] mb-4">Action Statistics</h2>
@@ -462,7 +612,6 @@ function DashboardContent() {
               </div>
             </div>
 
-            {/* Heatmap */}
             <div className="card p-5">
               <div className="flex items-center justify-between mb-4">
                 <h2 className="text-sm font-semibold text-[#f0fdf4]">Player Movement Heatmap</h2>
@@ -470,9 +619,7 @@ function DashboardContent() {
                   <button
                     onClick={() => setActiveHeatmapTeam("home")}
                     className={`px-3 py-1.5 text-xs transition-colors ${
-                      activeHeatmapTeam === "home"
-                        ? "bg-green-400 text-black font-medium"
-                        : "text-[#6b9e6b] hover:text-[#f0fdf4]"
+                      activeHeatmapTeam === "home" ? "bg-green-400 text-black font-medium" : "text-[#6b9e6b] hover:text-[#f0fdf4]"
                     }`}
                   >
                     {analysis.homeTeam.name}
@@ -480,9 +627,7 @@ function DashboardContent() {
                   <button
                     onClick={() => setActiveHeatmapTeam("away")}
                     className={`px-3 py-1.5 text-xs transition-colors ${
-                      activeHeatmapTeam === "away"
-                        ? "bg-green-400 text-black font-medium"
-                        : "text-[#6b9e6b] hover:text-[#f0fdf4]"
+                      activeHeatmapTeam === "away" ? "bg-green-400 text-black font-medium" : "text-[#6b9e6b] hover:text-[#f0fdf4]"
                     }`}
                   >
                     {analysis.awayTeam.name}
@@ -494,7 +639,6 @@ function DashboardContent() {
               </div>
             </div>
 
-            {/* Coaching insights */}
             <div className="card p-5">
               <div className="flex items-center gap-2 mb-5">
                 <div className="w-8 h-8 rounded-lg bg-green-400/10 flex items-center justify-center">
