@@ -88,6 +88,23 @@ function pct(value: number, total: number) {
   return Math.max(4, Math.min(100, (value / Math.max(total, 1)) * 100));
 }
 
+function renderablePlayers(players: Player[], maxPerTeam = 11) {
+  return (["home", "away"] as const).flatMap((team) => {
+    const best = new Map<string, Player>();
+    for (const player of players.filter((p) => p.team === team)) {
+      if (!best.has(player.id)) best.set(player.id, player);
+    }
+    return [...best.values()].slice(0, maxPerTeam);
+  });
+}
+
+function renderableFrame(frame: FrameData): FrameData {
+  return {
+    ...frame,
+    players: renderablePlayers(frame.players),
+  };
+}
+
 // Linear interpolation between sampled frames for smooth overlay motion.
 // IDs from the YOLO worker are currently per-frame, so players are also matched
 // by nearest same-team position to avoid visual jumps when detection order changes.
@@ -203,12 +220,12 @@ function TrackingOverlaySvg({ frame }: { frame: FrameData }) {
       viewBox="0 0 1280 720"
       preserveAspectRatio="none"
     >
-      {frame.players.map((player) => {
+      {renderablePlayers(frame.players).map((player, i) => {
         const cx = (player.position.x / 100) * 1280;
         const cy = (player.position.y / 100) * 720;
         const color = player.team === "home" ? HOME : AWAY;
         return (
-          <g key={player.id}>
+          <g key={`${player.id}-${i}`}>
             <path
               d={`M ${cx - 28} ${cy + 20} A 28 9 0 0 0 ${cx + 28} ${cy + 20}`}
               fill="none"
@@ -848,8 +865,8 @@ function DashboardContent() {
     );
   }
 
-  const currentFrame = selectedFrame ?? analysis.frames[0];
-  const displayFrame = liveFrame ?? currentFrame;
+  const currentFrame = renderableFrame(selectedFrame ?? analysis.frames[0]);
+  const displayFrame = renderableFrame(liveFrame ?? currentFrame);
   const frameImage = currentFrame ? frameImageStore.get(currentFrame.frameIndex) : null;
 
   const seekTo = (timestamp: number) => {

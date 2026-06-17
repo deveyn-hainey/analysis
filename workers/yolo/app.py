@@ -51,6 +51,7 @@ REFEREE_CLASSES = {name.strip().lower() for name in os.getenv("YOLO_REFEREE_CLAS
 DEFAULT_DENSE_FPS = float(os.getenv("YOLO_DENSE_FPS", "15"))
 TRACK_SMOOTHING_ALPHA = float(os.getenv("YOLO_TRACK_SMOOTHING_ALPHA", "0.35"))
 BALL_INTERPOLATION_LIMIT = int(os.getenv("YOLO_BALL_INTERPOLATION_LIMIT", "30"))
+MAX_PLAYERS_PER_TEAM = int(os.getenv("YOLO_MAX_PLAYERS_PER_TEAM", "11"))
 
 app = FastAPI(title="SoccerVision YOLO Worker")
 app.add_middleware(
@@ -214,6 +215,39 @@ def pitch_distance(a: dict[str, float], b: dict[str, float]) -> float:
     return float(np.hypot(a["x"] - b["x"], a["y"] - b["y"]))
 
 
+def box_area(box: tuple[float, float, float, float]) -> float:
+    x1, y1, x2, y2 = box
+    return max(0.0, x2 - x1) * max(0.0, y2 - y1)
+
+
+def prune_team_players(players: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep one detection per track ID and cap each side to a plausible XI."""
+    pruned: list[dict[str, Any]] = []
+
+    for team in ("home", "away"):
+        team_players = [p for p in players if p["team"] == team]
+        best_by_id: dict[str, dict[str, Any]] = {}
+        for player in team_players:
+            existing = best_by_id.get(player["id"])
+            player_score = float(player.get("detectionConfidence", 0.0)) * 1000 + float(player.get("boxArea", 0.0))
+            existing_score = (
+                float(existing.get("detectionConfidence", 0.0)) * 1000 + float(existing.get("boxArea", 0.0))
+                if existing
+                else -1
+            )
+            if existing is None or player_score > existing_score:
+                best_by_id[player["id"]] = player
+
+        kept = sorted(
+            best_by_id.values(),
+            key=lambda p: (float(p.get("detectionConfidence", 0.0)), float(p.get("boxArea", 0.0))),
+            reverse=True,
+        )[:MAX_PLAYERS_PER_TEAM]
+        pruned.extend(sorted(kept, key=lambda p: p["id"]))
+
+    return pruned
+
+
 def stabilize_player_ids(
     frame: dict[str, Any],
     tracks: dict[TeamId, list[TrackState]],
@@ -223,9 +257,9 @@ def stabilize_player_ids(
     """Assign stable hN/aN IDs and smooth positions across tracker dropouts."""
     timestamp = float(frame["timestamp"])
     updated_players: list[dict[str, Any]] = []
+    used_track_indices: dict[TeamId, set[int]] = {"home": set(), "away": set()}
 
     for team in ("home", "away"):
-        used_tracks: set[int] = set()
         team_players = [p for p in frame["players"] if p["team"] == team]
 
         for player in team_players:
@@ -243,7 +277,7 @@ def stabilize_player_ids(
             best_idx: Optional[int] = None
             best_cost = max_jump
             for idx, track in enumerate(team_tracks):
-                if idx in used_tracks:
+                if idx in used_track_indices[canonical_team]:
                     continue
                 if tracker_number is not None and track.get("tracker_id") == tracker_number:
                     best_idx = idx
@@ -272,7 +306,7 @@ def stabilize_player_ids(
                     "last_seen": timestamp,
                 })
             else:
-                used_tracks.add(best_idx)
+                used_track_indices[canonical_team].add(best_idx)
                 track = team_tracks[best_idx]
                 stable_id = str(track["id"])
                 previous_smoothed = track.get("smoothed_position", track["position"])
@@ -292,11 +326,11 @@ def stabilize_player_ids(
             player["position"] = team_tracks[best_idx]["smoothed_position"] if best_idx is not None else player["position"]
             updated_players.append(player)
 
-    frame["players"] = updated_players
+    frame["players"] = prune_team_players(updated_players)
     if frame.get("possessingPlayer"):
         poss = frame["possessingPlayer"]
         nearest = min(
-            [p for p in updated_players if p["team"] == poss["team"]],
+            [p for p in frame["players"] if p["team"] == poss["team"]],
             key=lambda p: pitch_distance(p["position"], frame["ballPosition"]),
             default=None,
         )
@@ -474,6 +508,8 @@ def analyze_single_frame(raw: RawFrame, frame_index: int) -> dict[str, Any]:
                 "role": player_role(position, team),
                 "position": position,
                 "action": "standing",
+                "detectionConfidence": round(detection.confidence, 3),
+                "boxArea": round(box_area(detection.xyxy), 1),
             }
         )
 
@@ -539,6 +575,8 @@ def analyze_precomputed_frame(
                 "role": player_role(position, team),
                 "position": position,
                 "action": "standing",
+                "detectionConfidence": round(detection.confidence, 3),
+                "boxArea": round(box_area(detection.xyxy), 1),
             }
         )
 
