@@ -56,6 +56,8 @@ BALL_INTERPOLATION_LIMIT = int(os.getenv("YOLO_BALL_INTERPOLATION_LIMIT", "30"))
 # not to leave a ghost where a player has actually left the frame.
 PLAYER_INTERPOLATION_LIMIT = int(os.getenv("YOLO_PLAYER_INTERPOLATION_LIMIT", "10"))
 MAX_PLAYERS_PER_TEAM = int(os.getenv("YOLO_MAX_PLAYERS_PER_TEAM", "11"))
+TRACK_DIAGNOSTICS = os.getenv("YOLO_TRACK_DIAGNOSTICS", "0") in ("1", "true", "True")
+TRACK_DIAGNOSTIC_EVERY = max(1, int(os.getenv("YOLO_TRACK_DIAGNOSTIC_EVERY", "1")))
 
 app = FastAPI(title="SoccerVision YOLO Worker")
 app.add_middleware(
@@ -364,6 +366,8 @@ def stabilize_player_ids(
     timestamp = float(frame["timestamp"])
     updated_players: list[dict[str, Any]] = []
     used_track_indices: dict[TeamId, set[int]] = {"home": set(), "away": set()}
+    matched_existing = 0
+    created_tracks = 0
 
     for team in ("home", "away"):
         team_players = [p for p in frame["players"] if p["team"] == team]
@@ -411,6 +415,7 @@ def stabilize_player_ids(
                     "smoothed_position": player["position"],
                     "last_seen": timestamp,
                 })
+                created_tracks += 1
             else:
                 used_track_indices[canonical_team].add(best_idx)
                 track = team_tracks[best_idx]
@@ -423,6 +428,7 @@ def stabilize_player_ids(
                 track["position"] = player["position"]
                 track["smoothed_position"] = smoothed
                 track["last_seen"] = timestamp
+                matched_existing += 1
 
             player["id"] = stable_id
             try:
@@ -432,7 +438,19 @@ def stabilize_player_ids(
             player["position"] = team_tracks[best_idx]["smoothed_position"] if best_idx is not None else player["position"]
             updated_players.append(player)
 
-    frame["players"] = prune_team_players(updated_players)
+    raw_players = updated_players
+    frame["players"] = prune_team_players(raw_players)
+    if TRACK_DIAGNOSTICS:
+        frame["_trackingDiagnostics"] = {
+            "rawPlayers": len(raw_players),
+            "postPrunePlayers": len(frame["players"]),
+            "matchedExisting": matched_existing,
+            "createdTracks": created_tracks,
+            "droppedByPrune": max(0, len(raw_players) - len(frame["players"])),
+            "homeCount": len([p for p in frame["players"] if p["team"] == "home"]),
+            "awayCount": len([p for p in frame["players"] if p["team"] == "away"]),
+            "stableIds": sorted(p["id"] for p in frame["players"]),
+        }
     if frame.get("possessingPlayer"):
         poss = frame["possessingPlayer"]
         nearest = min(
@@ -875,6 +893,7 @@ def analyze_video_file(
         tracks: dict[TeamId, list[TrackState]] = {"home": [], "away": []}
         next_ids: dict[TeamId, int] = {"home": 0, "away": 0}
         previous_possession: Union[TeamId, Literal["contested"]] = "contested"
+        previous_diag_ids: set[str] = set()
 
         if not use_huggingface_yolov5():
             tracker_config = os.getenv("YOLO_TRACKER", "bytetrack_soccer.yaml")
@@ -897,6 +916,7 @@ def analyze_video_file(
                     d for d in dets
                     if d.cls_name in PLAYER_CLASSES and d.cls_name not in REFEREE_CLASSES
                 ]
+                tracker_ids = [d.tracker_id for d in person_dets if d.tracker_id is not None]
                 frame_features = [crop_jersey_features(img, d.xyxy) for d in person_dets]
 
                 if global_centroids and frame_features:
@@ -911,6 +931,27 @@ def analyze_video_file(
                 raw = RawFrame(base64="", timestamp=timestamp)
                 frame = analyze_precomputed_frame(raw, output_idx, img, dets, teams)
                 frame = stabilize_player_ids(frame, tracks, next_ids)
+                if TRACK_DIAGNOSTICS and output_idx % TRACK_DIAGNOSTIC_EVERY == 0:
+                    diag = frame.get("_trackingDiagnostics", {})
+                    current_ids = set(diag.get("stableIds", []))
+                    logger.info(
+                        "track-diag frame=%04d t=%.2fs persons=%d bytetrack_unique=%d matched=%d new=%d raw=%d kept=%d home=%d away=%d dropped=%d id_added=%d id_lost=%d",
+                        output_idx,
+                        timestamp,
+                        len(person_dets),
+                        len(set(tracker_ids)),
+                        diag.get("matchedExisting", 0),
+                        diag.get("createdTracks", 0),
+                        diag.get("rawPlayers", 0),
+                        diag.get("postPrunePlayers", 0),
+                        diag.get("homeCount", 0),
+                        diag.get("awayCount", 0),
+                        diag.get("droppedByPrune", 0),
+                        len(current_ids - previous_diag_ids),
+                        len(previous_diag_ids - current_ids),
+                    )
+                    previous_diag_ids = current_ids
+                frame.pop("_trackingDiagnostics", None)
                 frame["possession"] = smooth_possession(frame, previous_possession)
                 previous_possession = frame["possession"]
                 dense_frames.append(frame)
@@ -965,9 +1006,37 @@ def analyze_video_file(
                 frame_idx += 1
 
         cap.release()
+        if TRACK_DIAGNOSTICS:
+            pre_post_ids = [set(player["id"] for player in frame["players"]) for frame in dense_frames]
+            avg_kept = sum(len(ids) for ids in pre_post_ids) / max(len(pre_post_ids), 1)
+            avg_delta = sum(
+                len(pre_post_ids[i] ^ pre_post_ids[i - 1])
+                for i in range(1, len(pre_post_ids))
+            ) / max(len(pre_post_ids) - 1, 1)
+            logger.info(
+                "track-diag pre-postprocess summary frames=%d avg_kept=%.2f avg_id_delta=%.2f unique_ids=%d",
+                len(dense_frames),
+                avg_kept,
+                avg_delta,
+                len(set().union(*pre_post_ids)) if pre_post_ids else 0,
+            )
         dense_frames = consolidate_player_teams(dense_frames)
         dense_frames = interpolate_player_positions(dense_frames)
         dense_frames = recompute_possession_for_frames(interpolate_ball_positions(dense_frames))
+        if TRACK_DIAGNOSTICS:
+            post_ids = [set(player["id"] for player in frame["players"]) for frame in dense_frames]
+            avg_kept = sum(len(ids) for ids in post_ids) / max(len(post_ids), 1)
+            avg_delta = sum(
+                len(post_ids[i] ^ post_ids[i - 1])
+                for i in range(1, len(post_ids))
+            ) / max(len(post_ids) - 1, 1)
+            logger.info(
+                "track-diag postprocess summary frames=%d avg_kept=%.2f avg_id_delta=%.2f unique_ids=%d",
+                len(dense_frames),
+                avg_kept,
+                avg_delta,
+                len(set().union(*post_ids)) if post_ids else 0,
+            )
         logger.info("analyze-video: complete — %d dense frames", len(dense_frames))
         return {"frames": dense_frames, "videoFps": video_fps, "targetFps": fps}
 
