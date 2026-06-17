@@ -41,7 +41,7 @@ function DashboardContent() {
   const [selectedFrame, setSelectedFrame] = useState<FrameData | null>(null);
   const [activeHeatmapTeam, setActiveHeatmapTeam] = useState<"home" | "away">("home");
   const [viewMode, setViewMode] = useState<ViewMode>("coach");
-  const [pitchView, setPitchView] = useState<"frame" | "tactical">("frame");
+  const [pitchView, setPitchView] = useState<"frame" | "tactical">("tactical");
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
 
@@ -49,6 +49,22 @@ function DashboardContent() {
     const url = videoStore.get();
     setVideoUrl(url);
   }, []);
+
+  // Keep the tactical field in sync with video playback — as the video plays,
+  // find the nearest sampled frame and update the player/ball overlay.
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !analysis) return;
+    const onTimeUpdate = () => {
+      const t = video.currentTime;
+      const closest = analysis.frames.reduce((best, f) =>
+        Math.abs(f.timestamp - t) < Math.abs(best.timestamp - t) ? f : best
+      );
+      setSelectedFrame(closest);
+    };
+    video.addEventListener("timeupdate", onTimeUpdate);
+    return () => video.removeEventListener("timeupdate", onTimeUpdate);
+  }, [analysis]);
 
   useEffect(() => {
     const stored = sessionStorage.getItem("matchAnalysis");
@@ -98,6 +114,99 @@ function DashboardContent() {
     a.click();
     URL.revokeObjectURL(url);
   };
+
+  // Shared video+tactical / frame-by-frame panel used in both view modes.
+  const pitchPanel = (
+    <div className="card p-4">
+      <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+        <div>
+          <h2 className="text-sm font-semibold text-[#f0fdf4]">
+            {pitchView === "tactical" ? "Video + Tactical" : "Frame View"}
+          </h2>
+          {pitchView === "tactical" && videoUrl && (
+            <p className="text-xs text-[#6b9e6b] mt-0.5">
+              Tactical field syncs to video playback
+            </p>
+          )}
+          {pitchView === "frame" && currentFrame && (
+            <p className="text-xs text-[#6b9e6b] mt-0.5">
+              {currentFrame.players.filter((p) => p.team === "home").length} home ·{" "}
+              {currentFrame.players.filter((p) => p.team === "away").length} away detected
+            </p>
+          )}
+        </div>
+        <div className="flex rounded-lg border border-[#1c3020] overflow-hidden text-xs">
+          <button
+            onClick={() => setPitchView("tactical")}
+            className={`px-2.5 py-1 transition-colors ${pitchView === "tactical" ? "bg-green-400 text-black font-medium" : "text-[#6b9e6b] hover:text-[#f0fdf4]"}`}
+          >
+            Tactical
+          </button>
+          <button
+            onClick={() => setPitchView("frame")}
+            className={`px-2.5 py-1 transition-colors ${pitchView === "frame" ? "bg-green-400 text-black font-medium" : "text-[#6b9e6b] hover:text-[#f0fdf4]"}`}
+          >
+            Frame
+          </button>
+        </div>
+      </div>
+
+      {pitchView === "tactical" && (
+        <div className="space-y-3">
+          {videoUrl ? (
+            <>
+              <video
+                ref={videoRef}
+                src={videoUrl}
+                controls
+                className="w-full rounded-lg"
+                style={{ maxHeight: 240 }}
+              />
+              <p className="text-xs text-[#6b9e6b]">
+                Click an event in the timeline to jump · field updates as video plays
+              </p>
+            </>
+          ) : (
+            <div className="border border-dashed border-[#1c3020] rounded-lg flex items-center justify-center gap-3 text-[#6b9e6b] text-xs py-5">
+              <Film className="w-4 h-4" />
+              Upload a clip to enable video playback and live tracking
+            </div>
+          )}
+          {currentFrame && <SoccerField frame={currentFrame} />}
+        </div>
+      )}
+
+      {pitchView === "frame" && (
+        <div className="space-y-3">
+          <div className="flex items-center gap-1 flex-wrap">
+            {analysis.frames.map((f) => (
+              <button
+                key={f.frameIndex}
+                onClick={() => setSelectedFrame(f)}
+                className={`text-xs px-2 py-1 rounded transition-colors ${
+                  selectedFrame?.frameIndex === f.frameIndex
+                    ? "bg-green-400 text-black font-medium"
+                    : "bg-[#142014] text-[#6b9e6b] hover:bg-[#1c3020]"
+                }`}
+              >
+                {Math.floor(f.timestamp / 60)}:{String(Math.floor(f.timestamp % 60)).padStart(2, "0")}
+              </button>
+            ))}
+          </div>
+          {currentFrame && (
+            frameImage
+              ? <FrameOverlay base64={frameImage} players={currentFrame.players} ballPosition={currentFrame.ballPosition} referees={currentFrame.referees} />
+              : <SoccerField frame={currentFrame} />
+          )}
+          {!frameImage && (
+            <p className="text-xs text-[#3d5c40] mt-2 text-center italic">
+              Frame images available after uploading a video
+            </p>
+          )}
+        </div>
+      )}
+    </div>
+  );
 
   return (
     <div className="min-h-screen bg-[#070e07]">
@@ -252,84 +361,8 @@ function DashboardContent() {
 
             {/* Video + Pitch + Timeline */}
             <div className="grid lg:grid-cols-5 gap-4">
-              <div className="lg:col-span-3 space-y-4">
-                {videoUrl ? (
-                  <div className="card p-4">
-                    <h2 className="text-sm font-semibold text-[#f0fdf4] mb-3">Match Footage</h2>
-                    <video
-                      ref={videoRef}
-                      src={videoUrl}
-                      controls
-                      className="w-full rounded-lg"
-                      style={{ maxHeight: 280 }}
-                    />
-                    <p className="text-xs text-[#6b9e6b] mt-2">
-                      Click any event in the timeline to jump to that moment
-                    </p>
-                  </div>
-                ) : (
-                  <div className="card p-4 border-dashed">
-                    <div className="flex items-center gap-3 text-[#6b9e6b] text-xs py-4 justify-center">
-                      <Film className="w-4 h-4" />
-                      Upload a clip to enable video playback and event scrubbing
-                    </div>
-                  </div>
-                )}
-
-                <div className="card p-4">
-                  <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
-                    <div>
-                      <h2 className="text-sm font-semibold text-[#f0fdf4]">Player Positions</h2>
-                      {currentFrame && (
-                        <p className="text-xs text-[#6b9e6b] mt-0.5">
-                          {currentFrame.players.filter((p) => p.team === "home").length} home ·{" "}
-                          {currentFrame.players.filter((p) => p.team === "away").length} away detected
-                        </p>
-                      )}
-                    </div>
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <div className="flex rounded-lg border border-[#1c3020] overflow-hidden text-xs">
-                        <button
-                          onClick={() => setPitchView("frame")}
-                          className={`px-2.5 py-1 transition-colors ${pitchView === "frame" ? "bg-green-400 text-black font-medium" : "text-[#6b9e6b] hover:text-[#f0fdf4]"}`}
-                        >
-                          Frame
-                        </button>
-                        <button
-                          onClick={() => setPitchView("tactical")}
-                          className={`px-2.5 py-1 transition-colors ${pitchView === "tactical" ? "bg-green-400 text-black font-medium" : "text-[#6b9e6b] hover:text-[#f0fdf4]"}`}
-                        >
-                          Tactical
-                        </button>
-                      </div>
-                      <div className="flex items-center gap-1 flex-wrap">
-                        {analysis.frames.map((f) => (
-                          <button
-                            key={f.frameIndex}
-                            onClick={() => setSelectedFrame(f)}
-                            className={`text-xs px-2 py-1 rounded transition-colors ${
-                              selectedFrame?.frameIndex === f.frameIndex
-                                ? "bg-green-400 text-black font-medium"
-                                : "bg-[#142014] text-[#6b9e6b] hover:bg-[#1c3020]"
-                            }`}
-                          >
-                            {Math.floor(f.timestamp / 60)}:{String(Math.floor(f.timestamp % 60)).padStart(2, "0")}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-                  {currentFrame && (
-                    pitchView === "frame" && frameImage
-                      ? <FrameOverlay base64={frameImage} players={currentFrame.players} ballPosition={currentFrame.ballPosition} referees={currentFrame.referees} />
-                      : <SoccerField frame={currentFrame} />
-                  )}
-                  {pitchView === "frame" && !frameImage && (
-                    <p className="text-xs text-[#3d5c40] mt-2 text-center italic">
-                      Frame view available after uploading a video — showing tactical view
-                    </p>
-                  )}
-                </div>
+              <div className="lg:col-span-3">
+                {pitchPanel}
               </div>
 
               <div className="lg:col-span-2 card p-4">
@@ -401,84 +434,8 @@ function DashboardContent() {
 
             {/* Video + Pitch + Timeline */}
             <div className="grid lg:grid-cols-5 gap-4">
-              <div className="lg:col-span-3 space-y-4">
-                {videoUrl ? (
-                  <div className="card p-4">
-                    <h2 className="text-sm font-semibold text-[#f0fdf4] mb-3">Match Footage</h2>
-                    <video
-                      ref={videoRef}
-                      src={videoUrl}
-                      controls
-                      className="w-full rounded-lg"
-                      style={{ maxHeight: 280 }}
-                    />
-                    <p className="text-xs text-[#6b9e6b] mt-2">
-                      Click any event in the timeline to jump to that moment
-                    </p>
-                  </div>
-                ) : (
-                  <div className="card p-4 border-dashed">
-                    <div className="flex items-center gap-3 text-[#6b9e6b] text-xs py-4 justify-center">
-                      <Film className="w-4 h-4" />
-                      Upload a clip to enable video playback and event scrubbing
-                    </div>
-                  </div>
-                )}
-
-                <div className="card p-4">
-                  <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
-                    <div>
-                      <h2 className="text-sm font-semibold text-[#f0fdf4]">Player Positions</h2>
-                      {currentFrame && (
-                        <p className="text-xs text-[#6b9e6b] mt-0.5">
-                          {currentFrame.players.filter((p) => p.team === "home").length} home ·{" "}
-                          {currentFrame.players.filter((p) => p.team === "away").length} away detected
-                        </p>
-                      )}
-                    </div>
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <div className="flex rounded-lg border border-[#1c3020] overflow-hidden text-xs">
-                        <button
-                          onClick={() => setPitchView("frame")}
-                          className={`px-2.5 py-1 transition-colors ${pitchView === "frame" ? "bg-green-400 text-black font-medium" : "text-[#6b9e6b] hover:text-[#f0fdf4]"}`}
-                        >
-                          Frame
-                        </button>
-                        <button
-                          onClick={() => setPitchView("tactical")}
-                          className={`px-2.5 py-1 transition-colors ${pitchView === "tactical" ? "bg-green-400 text-black font-medium" : "text-[#6b9e6b] hover:text-[#f0fdf4]"}`}
-                        >
-                          Tactical
-                        </button>
-                      </div>
-                      <div className="flex items-center gap-1 flex-wrap">
-                        {analysis.frames.map((f) => (
-                          <button
-                            key={f.frameIndex}
-                            onClick={() => setSelectedFrame(f)}
-                            className={`text-xs px-2 py-1 rounded transition-colors ${
-                              selectedFrame?.frameIndex === f.frameIndex
-                                ? "bg-green-400 text-black font-medium"
-                                : "bg-[#142014] text-[#6b9e6b] hover:bg-[#1c3020]"
-                            }`}
-                          >
-                            {Math.floor(f.timestamp / 60)}:{String(Math.floor(f.timestamp % 60)).padStart(2, "0")}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-                  {currentFrame && (
-                    pitchView === "frame" && frameImage
-                      ? <FrameOverlay base64={frameImage} players={currentFrame.players} ballPosition={currentFrame.ballPosition} referees={currentFrame.referees} />
-                      : <SoccerField frame={currentFrame} />
-                  )}
-                  {pitchView === "frame" && !frameImage && (
-                    <p className="text-xs text-[#3d5c40] mt-2 text-center italic">
-                      Frame view available after uploading a video — showing tactical view
-                    </p>
-                  )}
-                </div>
+              <div className="lg:col-span-3">
+                {pitchPanel}
               </div>
 
               <div className="lg:col-span-2 card p-4">
