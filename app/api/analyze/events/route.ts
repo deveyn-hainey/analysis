@@ -215,6 +215,18 @@ function eventKey(event: MatchEvent) {
   return `${Math.round(event.timestamp)}-${event.team ?? "none"}-${event.type}`;
 }
 
+function tooCloseToExisting(event: MatchEvent, events: MatchEvent[], windowSeconds: number) {
+  return events.some((existing) => {
+    if (existing.type !== event.type || existing.team !== event.team) return false;
+    if (Math.abs(existing.timestamp - event.timestamp) > windowSeconds) return false;
+    if (event.position && existing.position) {
+      const d = Math.hypot(event.position.x - existing.position.x, event.position.y - existing.position.y);
+      return d <= 14;
+    }
+    return true;
+  });
+}
+
 // Confirms goals from scoreboard reads alone, comparing every frame's scoreboard
 // across the whole clip — not just within one Claude review batch. This is what
 // catches a goal whose live action was never confirmed (candidate heuristics missed
@@ -262,6 +274,8 @@ function synthesizeGoalsFromScoreboard(frames: FrameData[]): FrameData[] {
 
 function synthesizeMovementEvents(frames: FrameData[]): FrameData[] {
   const existing = new Set(frames.flatMap((f) => f.events.map(eventKey)));
+  const allEvents = frames.flatMap((f) => f.events);
+  const lastRoutine = new Map<string, MatchEvent>();
 
   return frames.map((frame, i) => {
     const prev = frames[i - 1];
@@ -281,7 +295,11 @@ function synthesizeMovementEvents(frames: FrameData[]): FrameData[] {
         prev.possession !== frame.possession;
 
       if (sameTeamPossession && distance >= DRIBBLE_DISTANCE_THRESHOLD) {
+        const samePlayer =
+          prev.possessingPlayer?.team === frame.possessingPlayer?.team &&
+          prev.possessingPlayer?.playerId === frame.possessingPlayer?.playerId;
         const type: MatchEvent["type"] = distance >= PASS_DISTANCE_THRESHOLD ? "pass" : "dribble";
+        if (type === "pass" && samePlayer && distance < PASS_DISTANCE_THRESHOLD * 1.5) return { ...frame, events: frame.events };
         const team = frame.possession as TeamId;
         const event: MatchEvent = {
           id: `f${frame.frameIndex}-synth-${type}`,
@@ -299,7 +317,17 @@ function synthesizeMovementEvents(frames: FrameData[]): FrameData[] {
           conflicts: ["synthetic event from tracking, not visually verified by Claude"],
           pipelineFlag: "low_confidence",
         };
-        if (!existing.has(eventKey(event))) additions.push(event);
+        const routineKey = `${team}-${type}`;
+        const previousRoutine = lastRoutine.get(routineKey);
+        if (
+          !existing.has(eventKey(event)) &&
+          !tooCloseToExisting(event, allEvents, type === "pass" ? 5 : 4) &&
+          (!previousRoutine || Math.abs(event.timestamp - previousRoutine.timestamp) > (type === "pass" ? 4 : 3))
+        ) {
+          additions.push(event);
+          allEvents.push(event);
+          lastRoutine.set(routineKey, event);
+        }
       }
 
       if (possessionTurnover) {
@@ -318,7 +346,17 @@ function synthesizeMovementEvents(frames: FrameData[]): FrameData[] {
           conflicts: ["classified as tackle/turnover from tracking signal"],
           pipelineFlag: "low_confidence",
         };
-        if (!existing.has(eventKey(event))) additions.push(event);
+        const routineKey = `${team}-tackle`;
+        const previousRoutine = lastRoutine.get(routineKey);
+        if (
+          !existing.has(eventKey(event)) &&
+          !tooCloseToExisting(event, allEvents, 5) &&
+          (!previousRoutine || Math.abs(event.timestamp - previousRoutine.timestamp) > 5)
+        ) {
+          additions.push(event);
+          allEvents.push(event);
+          lastRoutine.set(routineKey, event);
+        }
       }
     }
 

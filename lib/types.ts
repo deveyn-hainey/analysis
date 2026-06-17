@@ -57,6 +57,8 @@ export interface MatchEvent {
   evidenceUsed?: string[];
   conflicts?: string[];
   pipelineFlag?: "missed_detection" | "scoreboard_conflict" | "replay_suspected" | "verifier_conflict" | "low_confidence";
+  xg?: number;
+  source?: "cv" | "heuristic" | "llm" | "scoreboard" | "fallback";
 }
 
 export interface FrameData {
@@ -90,6 +92,8 @@ export interface TeamStats {
   corners: number;
   goals: number;
   distanceCovered: number; // approx total meters covered by all players this team
+  expectedGoals?: number;
+  metricConfidence?: Partial<Record<"possession" | "passes" | "shots" | "xg" | "distance", number>>;
 }
 
 export interface TeamAnalysis {

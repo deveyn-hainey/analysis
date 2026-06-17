@@ -140,6 +140,9 @@ class Detection:
     tracker_id: Optional[int] = None
 
 
+TrackState = dict[str, Any]
+
+
 def decode_frame(raw: str) -> Image.Image:
     return Image.open(io.BytesIO(base64.b64decode(raw))).convert("RGB")
 
@@ -195,6 +198,100 @@ def player_role(position: dict[str, float], team: TeamId) -> str:
     if distance_from_own_goal < 68:
         return "mid"
     return "fwd"
+
+
+def pitch_distance(a: dict[str, float], b: dict[str, float]) -> float:
+    return float(np.hypot(a["x"] - b["x"], a["y"] - b["y"]))
+
+
+def stabilize_player_ids(
+    frame: dict[str, Any],
+    tracks: dict[TeamId, list[TrackState]],
+    next_ids: dict[TeamId, int],
+    max_jump: float = 16.0,
+) -> dict[str, Any]:
+    """Assign stable hN/aN IDs across sparse frames when tracker IDs are absent."""
+    timestamp = float(frame["timestamp"])
+    updated_players: list[dict[str, Any]] = []
+
+    for team in ("home", "away"):
+        used_tracks: set[int] = set()
+        team_players = [p for p in frame["players"] if p["team"] == team]
+
+        for player in team_players:
+            if player.get("number"):
+                stable_id = f"{'h' if team == 'home' else 'a'}{int(player['number'])}"
+                player["id"] = stable_id
+                updated_players.append(player)
+                continue
+
+            best_idx: Optional[int] = None
+            best_cost = max_jump
+            for idx, track in enumerate(tracks[team]):
+                if idx in used_tracks:
+                    continue
+                age = timestamp - float(track["last_seen"])
+                if age > 8.0:
+                    continue
+                cost = pitch_distance(player["position"], track["position"]) + age * 1.5
+                if cost < best_cost:
+                    best_idx = idx
+                    best_cost = cost
+
+            if best_idx is None:
+                next_ids[team] += 1
+                stable_id = f"{'h' if team == 'home' else 'a'}{next_ids[team]}"
+                tracks[team].append({
+                    "id": stable_id,
+                    "position": player["position"],
+                    "last_seen": timestamp,
+                })
+            else:
+                used_tracks.add(best_idx)
+                track = tracks[team][best_idx]
+                stable_id = str(track["id"])
+                track["position"] = player["position"]
+                track["last_seen"] = timestamp
+
+            player["id"] = stable_id
+            try:
+                player["number"] = int(stable_id[1:])
+            except Exception:
+                player["number"] = 0
+            updated_players.append(player)
+
+    frame["players"] = updated_players
+    if frame.get("possessingPlayer"):
+        poss = frame["possessingPlayer"]
+        nearest = min(
+            [p for p in updated_players if p["team"] == poss["team"]],
+            key=lambda p: pitch_distance(p["position"], frame["ballPosition"]),
+            default=None,
+        )
+        if nearest:
+            frame["possessingPlayer"] = {"team": nearest["team"], "playerId": nearest["id"]}
+
+    return frame
+
+
+def smooth_possession(
+    frame: dict[str, Any],
+    previous_possession: Union[TeamId, Literal["contested"]],
+    max_control_distance: float = 9.0,
+) -> Union[TeamId, Literal["contested"]]:
+    if not frame.get("ballPosition") or not frame["players"]:
+        return previous_possession if previous_possession != "contested" else "contested"
+
+    nearest = min(
+        frame["players"],
+        key=lambda p: pitch_distance(p["position"], frame["ballPosition"]),
+    )
+    distance = pitch_distance(nearest["position"], frame["ballPosition"])
+    if distance > max_control_distance:
+        return previous_possession if previous_possession != "contested" and distance <= max_control_distance * 1.6 else "contested"
+
+    frame["possessingPlayer"] = {"team": nearest["team"], "playerId": nearest["id"]}
+    return nearest["team"]
 
 
 def passes_confidence(cls_name: str, confidence: float) -> bool:
@@ -495,6 +592,9 @@ def analyze_video_file(
         # ── Pass 2: dense tracking at target fps ────────────────────────────────
         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
         dense_frames: list[dict[str, Any]] = []
+        tracks: dict[TeamId, list[TrackState]] = {"home": [], "away": []}
+        next_ids: dict[TeamId, int] = {"home": 0, "away": 0}
+        previous_possession: Union[TeamId, Literal["contested"]] = "contested"
 
         if not use_huggingface_yolov5():
             tracker_config = os.getenv("YOLO_TRACKER", "bytetrack.yaml")
@@ -529,7 +629,11 @@ def analyze_video_file(
                     teams = split_teams(colors)
 
                 raw = RawFrame(base64="", timestamp=timestamp)
-                dense_frames.append(analyze_precomputed_frame(raw, output_idx, img, dets, teams))
+                frame = analyze_precomputed_frame(raw, output_idx, img, dets, teams)
+                frame = stabilize_player_ids(frame, tracks, next_ids)
+                frame["possession"] = smooth_possession(frame, previous_possession)
+                previous_possession = frame["possession"]
+                dense_frames.append(frame)
 
                 if (output_idx + 1) % 50 == 0:
                     logger.info(
@@ -565,9 +669,11 @@ def analyze_video_file(
                         teams = split_teams(colors)
 
                     raw = RawFrame(base64="", timestamp=timestamp)
-                    dense_frames.append(
-                        analyze_precomputed_frame(raw, output_idx, img, dets, teams)
-                    )
+                    frame = analyze_precomputed_frame(raw, output_idx, img, dets, teams)
+                    frame = stabilize_player_ids(frame, tracks, next_ids)
+                    frame["possession"] = smooth_possession(frame, previous_possession)
+                    previous_possession = frame["possession"]
+                    dense_frames.append(frame)
                     output_idx += 1
 
                     if output_idx % 50 == 0:
@@ -598,6 +704,9 @@ def analyze_frames(request: AnalyzeFramesRequest) -> dict[str, Any]:
     # both teams to cluster reliably on its own, and a bad frame then only costs that
     # one frame instead of corrupting team assignment for the whole video.
     frames = []
+    tracks: dict[TeamId, list[TrackState]] = {"home": [], "away": []}
+    next_ids: dict[TeamId, int] = {"home": 0, "away": 0}
+    previous_possession: Union[TeamId, Literal["contested"]] = "contested"
     for i, raw_frame in enumerate(request.frames):
         image = decode_frame(raw_frame.base64)
         detections = detections_for_image(image)
@@ -607,7 +716,11 @@ def analyze_frames(request: AnalyzeFramesRequest) -> dict[str, Any]:
         ]
         colors = [crop_mean_color(image, d.xyxy) for d in person_detections]
         teams = split_teams(colors)
-        frames.append(analyze_precomputed_frame(raw_frame, i, image, detections, teams))
+        frame = analyze_precomputed_frame(raw_frame, i, image, detections, teams)
+        frame = stabilize_player_ids(frame, tracks, next_ids)
+        frame["possession"] = smooth_possession(frame, previous_possession)
+        previous_possession = frame["possession"]
+        frames.append(frame)
 
     return {
         "processingMethod": "yolo-worker",

@@ -9,22 +9,29 @@ import type {
   SummarizeRequest,
   TeamId,
 } from "@/lib/types";
+import {
+  distanceMeters,
+  estimateShotXg,
+  isStablePlayerId,
+  isVerifiedEvent,
+  shotLikeEvents,
+  stableTrackingCoverage,
+  teamExpectedGoals,
+} from "@/lib/visionMetrics";
 
 const SUMMARY_MODEL = process.env.ANTHROPIC_SUMMARY_MODEL ?? "claude-sonnet-4-6";
 
 function calcDistanceCovered(teamId: TeamId, frames: FrameData[]): number {
-  const PITCH_M_X = 105;
-  const PITCH_M_Y = 68;
   let total = 0;
   for (let i = 1; i < frames.length; i++) {
     const prev = frames[i - 1];
     const curr = frames[i];
     for (const player of curr.players.filter((p) => p.team === teamId)) {
+      if (!isStablePlayerId(player.id) || player.number <= 0) continue;
       const prevPlayer = prev.players.find((p) => p.id === player.id);
       if (!prevPlayer) continue;
-      const dx = ((player.position.x - prevPlayer.position.x) / 100) * PITCH_M_X;
-      const dy = ((player.position.y - prevPlayer.position.y) / 100) * PITCH_M_Y;
-      total += Math.sqrt(dx * dx + dy * dy);
+      const step = distanceMeters(player.position, prevPlayer.position);
+      if (step <= 9) total += step;
     }
   }
   return Math.round(total);
@@ -44,15 +51,6 @@ function buildHeatmap(teamId: TeamId, frames: FrameData[]): number[][] {
   return grid.map((row) => row.map((v) => +(v / max).toFixed(2)));
 }
 
-// Events created without Claude vision confirmation (YOLO-only fallback candidates,
-// or movement-synthesized pass/dribble/tackle events) are flagged "low_confidence".
-// They're worth surfacing in eventConflicts/keyEvents for coach review, but counting
-// them toward team stats and feeding them to the insights prompt silently corrupts
-// possession/passes/shots whenever a Claude review batch fails or is skipped.
-function isVerifiedEvent(event: MatchEvent) {
-  return event.pipelineFlag !== "low_confidence";
-}
-
 function countEventType(events: MatchEvent[], type: string, team?: TeamId) {
   return events.filter((e) => e.type === type && (!team || e.team === team) && isVerifiedEvent(e)).length;
 }
@@ -62,6 +60,7 @@ function duplicateWindowSeconds(type: MatchEvent["type"]) {
   if (["shot", "save", "corner", "goal-kick", "freekick", "foul", "offside", "card_yellow", "card_red", "card_unknown"].includes(type)) {
     return 6;
   }
+  if (["pass", "dribble", "tackle"].includes(type)) return 5;
   return 3;
 }
 
@@ -72,18 +71,25 @@ function mergeDuplicateEvents(events: MatchEvent[]): MatchEvent[] {
 
   const merged: MatchEvent[] = [];
   for (const event of sorted) {
-    const duplicate = merged.find((existing) =>
-      existing.type === event.type &&
-      existing.team === event.team &&
-      Math.abs(existing.timestamp - event.timestamp) <= duplicateWindowSeconds(event.type)
-    );
+    const duplicate = merged.find((existing) => {
+      if (existing.type !== event.type || existing.team !== event.team) return false;
+      if (Math.abs(existing.timestamp - event.timestamp) > duplicateWindowSeconds(event.type)) return false;
+      if (event.position && existing.position) {
+        const d = Math.hypot(event.position.x - existing.position.x, event.position.y - existing.position.y);
+        if (["pass", "dribble", "tackle"].includes(event.type)) return d <= 18;
+        return d <= 26;
+      }
+      return true;
+    });
 
     if (!duplicate) {
       merged.push(event);
       continue;
     }
 
-    const replaceDetails = event.confidence > duplicate.confidence;
+    const duplicateVerified = isVerifiedEvent(duplicate);
+    const eventVerified = isVerifiedEvent(event);
+    const replaceDetails = (eventVerified && !duplicateVerified) || event.confidence > duplicate.confidence;
     duplicate.confidence = Math.max(duplicate.confidence, event.confidence);
     duplicate.evidenceUsed = [...new Set([...(duplicate.evidenceUsed ?? []), ...(event.evidenceUsed ?? [])])];
     duplicate.conflicts = [...new Set([...(duplicate.conflicts ?? []), ...(event.conflicts ?? [])])];
@@ -141,7 +147,8 @@ function buildTeamAnalysis(
   // Player IDs are assigned per frame by the vision model, so possession changes
   // across frames are not stable enough to infer passes reliably.
   const passCount = countEventType(teamEvents, "pass");
-  const shotCount = countEventType(teamEvents, "shot");
+  const shotEvents = shotLikeEvents(teamEvents);
+  const shotCount = shotEvents.length;
   const possessionSampleFrames = frames.filter((f) => f.possession === "home" || f.possession === "away");
   const possessionFrames = possessionSampleFrames.filter((f) => f.possession === id).length;
   const possession =
@@ -161,7 +168,16 @@ function buildTeamAnalysis(
 
   // Pass accuracy: 0 when no passes, scales with volume since we only detect
   // visually successful passes from frames
-  const passAccuracy = passCount === 0 ? 0 : Math.min(92, 68 + passCount * 2);
+  const completedPasses = passCount;
+  const turnoverLike = countEventType(teamEvents, "tackle") + countEventType(teamEvents, "dribble");
+  const passAccuracy = completedPasses === 0
+    ? 0
+    : Math.round((completedPasses / Math.max(completedPasses + turnoverLike * 0.35, completedPasses)) * 100);
+  const trackingCoverage = stableTrackingCoverage(frames, id);
+  const expectedGoals = teamExpectedGoals(allEvents, id);
+  const verifiedEventShare = teamEvents.length
+    ? teamEvents.filter(isVerifiedEvent).length / teamEvents.length
+    : 0.5;
 
   return {
     id,
@@ -174,12 +190,20 @@ function buildTeamAnalysis(
       passes: passCount,
       passAccuracy,
       shots: shotCount,
-      shotsOnTarget: shotCount > 0 ? Math.max(1, Math.round(shotCount * 0.6)) : 0,
+      shotsOnTarget: shotLikeEvents(teamEvents).filter((event) => event.type === "goal" || event.type === "save").length,
       tackles: countEventType(teamEvents, "tackle"),
       fouls: countEventType(teamEvents, "foul"),
       corners: countEventType(teamEvents, "corner"),
       goals: countEventType(teamEvents, "goal"),
       distanceCovered: calcDistanceCovered(id, frames),
+      expectedGoals,
+      metricConfidence: {
+        possession: +(Math.min(0.88, Math.max(0.35, possessionSampleFrames.length / Math.max(frames.length, 1))).toFixed(2)),
+        passes: +(Math.min(0.82, 0.35 + verifiedEventShare * 0.42 + trackingCoverage * 0.12).toFixed(2)),
+        shots: +(Math.min(0.9, 0.42 + shotEvents.reduce((s, e) => s + e.confidence, 0) / Math.max(shotEvents.length, 1) * 0.45).toFixed(2)),
+        xg: +(Math.min(0.86, 0.38 + shotEvents.filter((event) => event.position).length / Math.max(shotEvents.length, 1) * 0.28 + verifiedEventShare * 0.2).toFixed(2)),
+        distance: +(Math.min(0.88, Math.max(0.2, trackingCoverage)).toFixed(2)),
+      },
     },
     heatmap: buildHeatmap(id, frames),
   };
@@ -282,14 +306,16 @@ Generate 4–5 specific, actionable coaching insights using the numbers below. I
 HOME (${homeTeam.name}):
 - Possession: ${homeTeam.stats.possession}%
 - Passes: ${homeTeam.stats.passes} (accuracy est. ${homeTeam.stats.passAccuracy}%)
-- Shots: ${homeTeam.stats.shots} (on target: ${homeTeam.stats.shotsOnTarget}) | Goals: ${homeTeam.stats.goals}
+- Shots: ${homeTeam.stats.shots} (on target: ${homeTeam.stats.shotsOnTarget}) | Goals: ${homeTeam.stats.goals} | xG: ${homeTeam.stats.expectedGoals?.toFixed(2) ?? "n/a"}
+- Metric confidence: possession ${homeTeam.stats.metricConfidence?.possession ?? 0}, passes ${homeTeam.stats.metricConfidence?.passes ?? 0}, shots ${homeTeam.stats.metricConfidence?.shots ?? 0}, distance ${homeTeam.stats.metricConfidence?.distance ?? 0}
 - Tackles: ${homeTeam.stats.tackles} | Fouls: ${homeTeam.stats.fouls} | Corners: ${homeTeam.stats.corners}
 - Avg player x-position: ${homeTeam.averagePosition.x}/100 (0=own goal, 100=opponent goal)
 
 AWAY (${awayTeam.name}):
 - Possession: ${awayTeam.stats.possession}%
 - Passes: ${awayTeam.stats.passes} (accuracy est. ${awayTeam.stats.passAccuracy}%)
-- Shots: ${awayTeam.stats.shots} (on target: ${awayTeam.stats.shotsOnTarget}) | Goals: ${awayTeam.stats.goals}
+- Shots: ${awayTeam.stats.shots} (on target: ${awayTeam.stats.shotsOnTarget}) | Goals: ${awayTeam.stats.goals} | xG: ${awayTeam.stats.expectedGoals?.toFixed(2) ?? "n/a"}
+- Metric confidence: possession ${awayTeam.stats.metricConfidence?.possession ?? 0}, passes ${awayTeam.stats.metricConfidence?.passes ?? 0}, shots ${awayTeam.stats.metricConfidence?.shots ?? 0}, distance ${awayTeam.stats.metricConfidence?.distance ?? 0}
 - Tackles: ${awayTeam.stats.tackles} | Fouls: ${awayTeam.stats.fouls} | Corners: ${awayTeam.stats.corners}
 - Avg player x-position: ${awayTeam.averagePosition.x}/100
 
@@ -354,7 +380,16 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "No frames provided." }, { status: 400 });
     }
 
-    const allEvents = mergeDuplicateEvents(frames.flatMap((f) => f.events));
+    const allEvents: MatchEvent[] = mergeDuplicateEvents(frames.flatMap((f) => f.events)).map((event): MatchEvent => {
+      const source: MatchEvent["source"] = event.id.includes("-scoreboard-goal-")
+        ? "scoreboard"
+        : event.pipelineFlag === "low_confidence"
+        ? "heuristic"
+        : "llm";
+      return ["shot", "goal", "save"].includes(event.type)
+        ? { ...event, xg: estimateShotXg(event), source }
+        : { ...event, source };
+    });
     const eventConflicts = buildEventConflicts(allEvents);
 
     const homeTeam = buildTeamAnalysis("home", frames, allEvents);

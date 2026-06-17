@@ -22,6 +22,7 @@ import Heatmap from "@/components/Heatmap";
 import { videoStore } from "@/lib/videoStore";
 import { frameImageStore } from "@/lib/frameImageStore";
 import { denseFrameStore } from "@/lib/denseFrameStore";
+import { buildPassNetwork, estimateShotXg, teamExpectedGoals } from "@/lib/visionMetrics";
 
 const PANEL = "rounded-lg border border-[#1c3020] bg-[#0b130d] shadow-[0_0_40px_rgba(74,222,128,0.03)]";
 const EYEBROW = "text-[11px] uppercase tracking-[0.28em] text-[#5f7567] font-mono";
@@ -42,6 +43,7 @@ function initials(name: string) {
 }
 
 function estimateXg(stats: MatchAnalysis["homeTeam"]["stats"]) {
+  if (typeof stats.expectedGoals === "number") return stats.expectedGoals;
   const value = stats.shots * 0.09 + stats.shotsOnTarget * 0.18 + stats.goals * 0.32 + stats.corners * 0.04;
   return Math.max(stats.goals * 0.65, value);
 }
@@ -422,11 +424,11 @@ function VisionMetricStrip({ analysis }: { analysis: MatchAnalysis }) {
   const home = analysis.homeTeam.stats;
   const away = analysis.awayTeam.stats;
   const metrics = [
-    { label: "expected goals", value: estimateXg(home).toFixed(2), suffix: "xG", sub: `vs ${estimateXg(away).toFixed(2)}`, fill: pct(estimateXg(home), estimateXg(home) + estimateXg(away)) },
-    { label: "possession", value: home.possession.toString(), suffix: "%", sub: `vs ${away.possession}%`, fill: home.possession },
-    { label: "pass accuracy", value: home.passAccuracy.toString(), suffix: "%", sub: `vs ${away.passAccuracy}%`, fill: home.passAccuracy },
-    { label: "shots on target", value: home.shotsOnTarget.toString(), suffix: "", sub: `vs ${away.shotsOnTarget}`, fill: pct(home.shotsOnTarget, home.shotsOnTarget + away.shotsOnTarget) },
-    { label: "distance covered", value: (home.distanceCovered / 1000).toFixed(1), suffix: "km", sub: `vs ${(away.distanceCovered / 1000).toFixed(1)} km`, fill: pct(home.distanceCovered, home.distanceCovered + away.distanceCovered) },
+    { label: "expected goals", value: estimateXg(home).toFixed(2), suffix: "xG", sub: `conf ${Math.round((home.metricConfidence?.xg ?? 0.45) * 100)}% · vs ${estimateXg(away).toFixed(2)}`, fill: pct(estimateXg(home), estimateXg(home) + estimateXg(away)) },
+    { label: "possession", value: home.possession.toString(), suffix: "%", sub: `conf ${Math.round((home.metricConfidence?.possession ?? 0.5) * 100)}% · vs ${away.possession}%`, fill: home.possession },
+    { label: "pass accuracy", value: home.passAccuracy.toString(), suffix: "%", sub: `inferred · vs ${away.passAccuracy}%`, fill: home.passAccuracy },
+    { label: "shots on target", value: home.shotsOnTarget.toString(), suffix: "", sub: `verified · vs ${away.shotsOnTarget}`, fill: pct(home.shotsOnTarget, home.shotsOnTarget + away.shotsOnTarget) },
+    { label: "distance covered", value: (home.distanceCovered / 1000).toFixed(1), suffix: "km", sub: `stable IDs ${Math.round((home.metricConfidence?.distance ?? 0) * 100)}%`, fill: pct(home.distanceCovered, home.distanceCovered + away.distanceCovered) },
     { label: "key events", value: analysis.keyEvents.length.toString(), suffix: "", sub: `${analysis.keyEvents.filter((e) => e.isKeyMoment).length} key moments`, fill: Math.min(100, analysis.keyEvents.length * 9) },
   ];
 
@@ -459,11 +461,10 @@ function XgMomentumPanel({ analysis }: { analysis: MatchAnalysis }) {
     let current = 0;
     const parts = [`M 40 290`];
     sorted.forEach((event, index) => {
-      const share = totalXg / Math.max(sorted.length, 1);
-      const boost = event.type === "goal" ? 0.18 : event.type === "shot" ? 0.12 : 0.08;
+      const share = event.xg ?? estimateShotXg(event);
       const x = 40 + (event.timestamp / duration) * 620;
       const yPrev = 290 - Math.min(250, current * 92);
-      current += Math.max(share, boost);
+      current += share;
       const yNext = 290 - Math.min(250, current * 92);
       parts.push(`L ${x.toFixed(1)} ${yPrev.toFixed(1)} L ${x.toFixed(1)} ${yNext.toFixed(1)}`);
       if (index === sorted.length - 1) parts.push(`L 660 ${yNext.toFixed(1)}`);
@@ -472,8 +473,10 @@ function XgMomentumPanel({ analysis }: { analysis: MatchAnalysis }) {
     return parts.join(" ");
   };
 
-  const homeXg = estimateXg(analysis.homeTeam.stats);
-  const awayXg = estimateXg(analysis.awayTeam.stats);
+  const homeEventXg = teamExpectedGoals(analysis.keyEvents, "home");
+  const awayEventXg = teamExpectedGoals(analysis.keyEvents, "away");
+  const homeXg = analysis.homeTeam.stats.expectedGoals ?? (homeEventXg || estimateXg(analysis.homeTeam.stats));
+  const awayXg = analysis.awayTeam.stats.expectedGoals ?? (awayEventXg || estimateXg(analysis.awayTeam.stats));
   const goalEvents = analysis.keyEvents.filter((event) => event.type === "goal");
 
   return (
@@ -568,18 +571,12 @@ function PitchLines() {
 
 function ShotMapPanel({ analysis }: { analysis: MatchAnalysis }) {
   const shots = analysis.keyEvents.filter((event) => ["shot", "goal", "save"].includes(event.type));
-  const fallback = Array.from({ length: Math.max(analysis.homeTeam.stats.shots + analysis.awayTeam.stats.shots, 8) }, (_, i) => ({
-    id: `fallback-${i}`,
-    type: i % 5 === 0 ? "goal" : i % 3 === 0 ? "save" : "shot",
-    team: i % 3 === 0 ? "away" : "home",
-    position: { x: 18 + ((i * 53) % 72), y: 18 + ((i * 37) % 66) },
-  }));
-  const points = shots.length ? shots : fallback;
+  const points = shots.filter((event) => event.position);
 
   return (
     <div className={`${PANEL} p-6`}>
       <div className={EYEBROW}>shot map</div>
-      <h2 className="mt-3 text-xl font-black text-[#f0fdf4]">Location & Quality - {points.length} shots</h2>
+      <h2 className="mt-3 text-xl font-black text-[#f0fdf4]">Location & Quality - {points.length} located shots</h2>
       <div className="relative mx-auto mt-8 aspect-[700/454] max-w-4xl rounded-lg bg-[#09110c]">
         <PitchLines />
         <svg viewBox="0 0 700 454" className="absolute inset-0 h-full w-full">
@@ -588,7 +585,7 @@ function ShotMapPanel({ analysis }: { analysis: MatchAnalysis }) {
             const y = (event.position?.y ?? 50) * 4.54;
             const isGoal = event.type === "goal";
             const isHome = event.team === "home";
-            const r = isGoal ? 15 : 7 + (i % 4) * 2;
+            const r = isGoal ? 15 : 7 + Math.round((event.xg ?? estimateShotXg(event)) * 18);
             return (
               <circle
                 key={event.id}
@@ -609,22 +606,32 @@ function ShotMapPanel({ analysis }: { analysis: MatchAnalysis }) {
         <span className="text-yellow-300">● goal</span>
         <span className="text-green-300">● on target</span>
         <span>○ off target</span>
-        <span>● blocked</span>
+        <span>size = xG estimate</span>
       </div>
+      {points.length === 0 && (
+        <p className="mt-4 text-xs font-mono text-amber-300">No verified shot locations available for this clip.</p>
+      )}
     </div>
   );
 }
 
-function PassNetworkPanel({ frame, teamName }: { frame: FrameData; teamName: string }) {
-  const players = frame.players.filter((player) => player.team === "home").slice(0, 11);
-  const nodes = players.length ? players : Array.from({ length: 9 }, (_, i) => ({
-    id: `node-${i}`,
-    number: i + 1,
-    team: "home" as const,
-    role: "mid" as const,
-    action: "standing" as const,
-    position: { x: 12 + ((i * 17) % 78), y: 20 + ((i * 31) % 58) },
-  }));
+function PassNetworkPanel({ frames, currentFrame, teamName }: { frames: FrameData[]; currentFrame: FrameData; teamName: string }) {
+  const startTime = Math.max(0, currentFrame.timestamp - 20);
+  const recentFrames = frames.filter((frame) => frame.timestamp >= startTime && frame.timestamp <= currentFrame.timestamp);
+  const networkFrames = recentFrames.length >= 2 ? recentFrames : frames.filter((frame) => frame.timestamp <= currentFrame.timestamp);
+  const network = buildPassNetwork(networkFrames.length ? networkFrames : [currentFrame], "home");
+  const currentPlayers = currentFrame.players.filter((player) => player.team === "home").slice(0, 11);
+  const nodes = (network.nodes.length
+    ? network.nodes
+    : currentPlayers.map((player) => ({
+        id: player.id,
+        number: player.number,
+        team: player.team,
+        position: player.position,
+        touches: 1,
+      }))
+  ).slice(0, 11);
+  const maxTouches = Math.max(1, ...nodes.map((node) => node.touches));
 
   return (
     <div className={`${PANEL} p-6`}>
@@ -633,33 +640,48 @@ function PassNetworkPanel({ frame, teamName }: { frame: FrameData; teamName: str
       <div className="relative mx-auto mt-8 aspect-[700/454] max-w-4xl rounded-lg bg-[#09110c]">
         <PitchLines />
         <svg viewBox="0 0 700 454" className="absolute inset-0 h-full w-full">
-          {nodes.map((node, i) => {
-            const next = nodes[(i + 1) % nodes.length];
-            if (!next || i % 4 === 3) return null;
+          {network.links.map((link) => {
+            const node = nodes.find((candidate) => candidate.id === link.from);
+            const next = nodes.find((candidate) => candidate.id === link.to);
+            if (!node || !next) return null;
             return (
               <line
-                key={`${node.id}-${next.id}`}
+                key={`${link.from}-${link.to}`}
                 x1={node.position.x * 7}
                 y1={node.position.y * 4.54}
                 x2={next.position.x * 7}
                 y2={next.position.y * 4.54}
                 stroke="#5ee178"
-                strokeWidth={2 + (i % 3)}
+                strokeWidth={1.5 + Math.min(5, link.count)}
                 opacity={0.32}
               />
             );
           })}
           {nodes.map((node, i) => (
             <g key={node.id}>
-              <circle cx={node.position.x * 7} cy={node.position.y * 4.54} r={18 + (i % 3) * 3} fill="#59d879" fillOpacity={0.72} stroke="#78f09a" strokeWidth={2} />
+              <circle cx={node.position.x * 7} cy={node.position.y * 4.54} r={14 + (node.touches / maxTouches) * 13} fill="#59d879" fillOpacity={0.72} stroke="#78f09a" strokeWidth={2} />
               <text x={node.position.x * 7} y={node.position.y * 4.54 + 5} textAnchor="middle" fill="#061008" fontSize={13} fontWeight={900}>
                 {node.number || i + 1}
               </text>
             </g>
           ))}
+          {currentPlayers.map((player) => (
+            <circle
+              key={`live-${player.id}`}
+              cx={player.position.x * 7}
+              cy={player.position.y * 4.54}
+              r={5}
+              fill="#f0fdf4"
+              fillOpacity={0.9}
+              stroke="#061008"
+              strokeWidth={1.5}
+            />
+          ))}
         </svg>
       </div>
-      <div className="mt-5 text-xs font-mono text-[#829086]">● node size = touches - line weight = pass volume</div>
+      <div className="mt-5 text-xs font-mono text-[#829086]">
+        {nodes.length ? "● node size = recent touches - line weight = possession transitions - white dot = live position" : "No stable possession-player transitions available"}
+      </div>
     </div>
   );
 }
@@ -835,10 +857,9 @@ function DashboardContent() {
     URL.revokeObjectURL(url);
   };
 
-  // Shared pitch panel — Tactical stacks video+overlay above the abstract field
-  // (both driven by the interpolated liveFrame), Frame shows
-  // the raw extracted image with dot overlay for precise frame inspection.
-  const pitchPanel = (
+  // Shared tracking panel — Live Tracking keeps the video + overlay as the primary
+  // surface. The tactical field is rendered as its own report panel below.
+  const trackingPanel = (
     <div className="card p-4">
       <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
         <div>
@@ -885,34 +906,19 @@ function DashboardContent() {
 
       {pitchView === "tactical" && (
         videoUrl ? (
-          <div className="space-y-4">
-            <div className="relative rounded-lg overflow-hidden bg-black">
-              <video
-                ref={videoRef}
-                src={videoUrl}
-                controls
-                className="w-full block aspect-video object-contain"
-              />
-              <TrackingOverlaySvg frame={displayFrame} />
-            </div>
-            <div className="rounded-lg border border-[#1c3020] bg-[#081208] p-3">
-              <div className="mb-2 flex items-center justify-between text-xs text-[#6b9e6b]">
-                <span>Tactical frame</span>
-                <span>{formatDuration(displayFrame.timestamp)}</span>
-              </div>
-              <div className="mx-auto max-w-4xl">
-                <SoccerField frame={displayFrame} />
-              </div>
-            </div>
+          <div className="relative rounded-lg overflow-hidden bg-black">
+            <video
+              ref={videoRef}
+              src={videoUrl}
+              controls
+              className="w-full block aspect-video object-contain"
+            />
+            <TrackingOverlaySvg frame={displayFrame} />
           </div>
         ) : (
-          // No video — show placeholder + full-width tactical field
-          <div className="space-y-3">
-            <div className="border border-dashed border-[#1c3020] rounded-lg flex items-center justify-center gap-3 text-[#6b9e6b] text-xs py-5">
-              <Film className="w-4 h-4" />
-              Upload a clip to enable live tracking overlay
-            </div>
-            {currentFrame && <SoccerField frame={currentFrame} />}
+          <div className="border border-dashed border-[#1c3020] rounded-lg flex items-center justify-center gap-3 text-[#6b9e6b] text-xs py-16">
+            <Film className="w-4 h-4" />
+            Upload a clip to enable live tracking overlay
           </div>
         )
       )}
@@ -946,6 +952,53 @@ function DashboardContent() {
           )}
         </div>
       )}
+    </div>
+  );
+
+  const tacticalFramePanel = (
+    <div className={`${PANEL} p-6`}>
+      <div className="flex items-center justify-between gap-4">
+        <div>
+          <div className={EYEBROW}>tactical frame</div>
+          <h2 className="mt-3 text-xl font-black text-[#f0fdf4]">Current Shape</h2>
+        </div>
+        <span className="rounded-lg border border-[#1c3020] px-3 py-1.5 text-xs font-mono text-[#829086]">
+          {formatDuration(displayFrame.timestamp)}
+        </span>
+      </div>
+      <div className="mt-6 mx-auto max-w-4xl">
+        <SoccerField frame={displayFrame} />
+      </div>
+    </div>
+  );
+
+  const spatialOccupancyPanel = (
+    <div className={`${PANEL} p-6`}>
+      <div className="flex items-center justify-between gap-4 mb-6">
+        <div>
+          <div className={EYEBROW}>player movement heatmap</div>
+          <h2 className="mt-3 text-2xl font-black text-[#f0fdf4]">Spatial Occupancy</h2>
+        </div>
+        <div className="flex rounded-lg overflow-hidden border border-[#1c3020] bg-[#07100a] p-1">
+          <button
+            onClick={() => setActiveHeatmapTeam("home")}
+            className={`rounded-md px-4 py-2 text-xs font-bold transition-colors ${
+              activeHeatmapTeam === "home" ? "bg-green-400 text-black" : "text-[#829086] hover:text-[#f0fdf4]"
+            }`}
+          >
+            {analysis.homeTeam.name}
+          </button>
+          <button
+            onClick={() => setActiveHeatmapTeam("away")}
+            className={`rounded-md px-4 py-2 text-xs font-bold transition-colors ${
+              activeHeatmapTeam === "away" ? "bg-green-400 text-black" : "text-[#829086] hover:text-[#f0fdf4]"
+            }`}
+          >
+            {analysis.awayTeam.name}
+          </button>
+        </div>
+      </div>
+      <Heatmap team={activeHeatmapTeam === "home" ? analysis.homeTeam : analysis.awayTeam} />
     </div>
   );
 
@@ -1036,12 +1089,12 @@ function DashboardContent() {
           <>
             <SummaryPanel analysis={analysis} />
             <div className="grid lg:grid-cols-12 gap-4">
-              <div className="lg:col-span-8">{pitchPanel}</div>
+              <div className="lg:col-span-8">{trackingPanel}</div>
               <div className="lg:col-span-4">
-                <div className={`${PANEL} p-5 h-full`}>
+                <div className={`${PANEL} p-5 max-h-[560px] overflow-hidden`}>
                   <div className={EYEBROW}>match events</div>
                   <h2 className="mt-2 text-xl font-black text-[#f0fdf4]">Auto-extracted from video</h2>
-                  <div className="mt-5">
+                  <div className="mt-5 max-h-[460px] overflow-y-auto pr-1">
                     <EventTimeline
                       events={analysis.keyEvents}
                       selectedEventId={selectedEventId}
@@ -1081,12 +1134,12 @@ function DashboardContent() {
             <VisionMetricStrip analysis={analysis} />
 
             <div className="grid lg:grid-cols-12 gap-4">
-              <div className="lg:col-span-8">{pitchPanel}</div>
+              <div className="lg:col-span-8">{trackingPanel}</div>
               <div className="lg:col-span-4">
-                <div className={`${PANEL} p-5 h-full`}>
+                <div className={`${PANEL} p-5 max-h-[560px] overflow-hidden`}>
                   <div className={EYEBROW}>match events</div>
                   <h2 className="mt-2 text-xl font-black text-[#f0fdf4]">Auto-extracted from video</h2>
-                  <div className="mt-5">
+                  <div className="mt-5 max-h-[460px] overflow-y-auto pr-1">
                     <EventTimeline
                       events={analysis.keyEvents}
                       selectedEventId={selectedEventId}
@@ -1100,6 +1153,11 @@ function DashboardContent() {
               </div>
             </div>
 
+            <div className="grid lg:grid-cols-2 gap-4">
+              {tacticalFramePanel}
+              <PassNetworkPanel frames={denseFrames.length ? denseFrames : analysis.frames} currentFrame={displayFrame} teamName={analysis.homeTeam.name} />
+            </div>
+
             <div className="grid lg:grid-cols-[1.35fr_0.65fr] gap-4">
               <XgMomentumPanel analysis={analysis} />
               <FinishingPanel analysis={analysis} />
@@ -1110,51 +1168,21 @@ function DashboardContent() {
                 <div className={EYEBROW}>action statistics</div>
                 <h2 className="mt-3 text-xl font-black text-[#f0fdf4]">Duels & Set Actions</h2>
                 <div className="mt-5">
-                <StatsChart homeTeam={analysis.homeTeam} awayTeam={analysis.awayTeam} />
+                  <StatsChart homeTeam={analysis.homeTeam} awayTeam={analysis.awayTeam} />
                 </div>
               </div>
               <div className={`${PANEL} p-6`}>
                 <div className={EYEBROW}>head to head</div>
                 <h2 className="mt-3 text-xl font-black text-[#f0fdf4]">Team Comparison</h2>
                 <div className="mt-5">
-                <TeamComparison homeTeam={analysis.homeTeam} awayTeam={analysis.awayTeam} />
+                  <TeamComparison homeTeam={analysis.homeTeam} awayTeam={analysis.awayTeam} />
                 </div>
               </div>
             </div>
 
             <div className="grid lg:grid-cols-2 gap-4">
+              {spatialOccupancyPanel}
               <ShotMapPanel analysis={analysis} />
-              <PassNetworkPanel frame={displayFrame} teamName={analysis.homeTeam.name} />
-            </div>
-
-            <div className={`${PANEL} p-8`}>
-              <div className="flex items-center justify-between gap-4 mb-7">
-                <div>
-                  <div className={EYEBROW}>player movement heatmap</div>
-                  <h2 className="mt-3 text-3xl font-black text-[#f0fdf4]">Spatial Occupancy</h2>
-                </div>
-                <div className="flex rounded-lg overflow-hidden border border-[#1c3020] bg-[#07100a] p-1">
-                  <button
-                    onClick={() => setActiveHeatmapTeam("home")}
-                    className={`rounded-md px-6 py-2 text-sm font-bold transition-colors ${
-                      activeHeatmapTeam === "home" ? "bg-green-400 text-black" : "text-[#829086] hover:text-[#f0fdf4]"
-                    }`}
-                  >
-                    {analysis.homeTeam.name}
-                  </button>
-                  <button
-                    onClick={() => setActiveHeatmapTeam("away")}
-                    className={`rounded-md px-6 py-2 text-sm font-bold transition-colors ${
-                      activeHeatmapTeam === "away" ? "bg-green-400 text-black" : "text-[#829086] hover:text-[#f0fdf4]"
-                    }`}
-                  >
-                    {analysis.awayTeam.name}
-                  </button>
-                </div>
-              </div>
-              <div className="mx-auto max-w-7xl">
-                <Heatmap team={activeHeatmapTeam === "home" ? analysis.homeTeam : analysis.awayTeam} />
-              </div>
             </div>
 
             <div className={`${PANEL} p-6`}>
