@@ -76,7 +76,7 @@ export interface FrameData {
   // confirmed deterministically from the score increasing between any two frames,
   // even when they land in different review batches or a batch's event
   // confirmation otherwise fails — see synthesizeGoalsFromScoreboard.
-  scoreboard?: { home: number; away: number } | null;
+  scoreboard?: { home: number; away: number; homeLabel?: string; awayLabel?: string } | null;
 }
 
 export interface TeamStats {

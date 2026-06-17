@@ -46,6 +46,42 @@ function estimateXg(stats: MatchAnalysis["homeTeam"]["stats"]) {
   return Math.max(stats.goals * 0.65, value);
 }
 
+function bestScoreboardLabel(frames: FrameData[], side: "home" | "away") {
+  const key = side === "home" ? "homeLabel" : "awayLabel";
+  const counts = new Map<string, number>();
+
+  for (const frame of frames) {
+    const label = frame.scoreboard?.[key];
+    if (!label) continue;
+    const cleaned = label.trim().replace(/\s+/g, " ");
+    if (cleaned.length < 2 || cleaned.length > 20 || /^\d+$/.test(cleaned)) continue;
+    counts.set(cleaned, (counts.get(cleaned) ?? 0) + 1);
+  }
+
+  return [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
+}
+
+function withScoreboardTeamNames(analysis: MatchAnalysis): MatchAnalysis {
+  const homeLabel = bestScoreboardLabel(analysis.frames, "home");
+  const awayLabel = bestScoreboardLabel(analysis.frames, "away");
+  const homeIsGeneric = /^(home team|home)$/i.test(analysis.homeTeam.name);
+  const awayIsGeneric = /^(away team|away)$/i.test(analysis.awayTeam.name);
+
+  if ((!homeLabel || !homeIsGeneric) && (!awayLabel || !awayIsGeneric)) return analysis;
+
+  return {
+    ...analysis,
+    homeTeam: {
+      ...analysis.homeTeam,
+      name: homeLabel && homeIsGeneric ? homeLabel : analysis.homeTeam.name,
+    },
+    awayTeam: {
+      ...analysis.awayTeam,
+      name: awayLabel && awayIsGeneric ? awayLabel : analysis.awayTeam.name,
+    },
+  };
+}
+
 function pct(value: number, total: number) {
   return Math.max(4, Math.min(100, (value / Math.max(total, 1)) * 100));
 }
@@ -744,7 +780,7 @@ function DashboardContent() {
     const stored = sessionStorage.getItem("matchAnalysis");
     if (stored) {
       try {
-        const data = JSON.parse(stored) as MatchAnalysis;
+        const data = withScoreboardTeamNames(JSON.parse(stored) as MatchAnalysis);
         setAnalysis(data);
         if (data.frames.length > 0) {
           setSelectedFrame(data.frames[0]);
@@ -1091,49 +1127,33 @@ function DashboardContent() {
               <PassNetworkPanel frame={displayFrame} teamName={analysis.homeTeam.name} />
             </div>
 
-            <div className="grid lg:grid-cols-[1.35fr_0.65fr] gap-4">
-              <div className={`${PANEL} p-6`}>
-                <div className="flex items-center justify-between gap-4 mb-5">
-                  <div>
-                    <div className={EYEBROW}>player movement heatmap</div>
-                    <h2 className="mt-3 text-xl font-black text-[#f0fdf4]">Spatial Occupancy</h2>
-                  </div>
-                <div className="flex rounded-lg overflow-hidden border border-[#1c3020]">
+            <div className={`${PANEL} p-8`}>
+              <div className="flex items-center justify-between gap-4 mb-7">
+                <div>
+                  <div className={EYEBROW}>player movement heatmap</div>
+                  <h2 className="mt-3 text-3xl font-black text-[#f0fdf4]">Spatial Occupancy</h2>
+                </div>
+                <div className="flex rounded-lg overflow-hidden border border-[#1c3020] bg-[#07100a] p-1">
                   <button
                     onClick={() => setActiveHeatmapTeam("home")}
-                    className={`px-3 py-1.5 text-xs transition-colors ${
-                      activeHeatmapTeam === "home" ? "bg-green-400 text-black font-medium" : "text-[#6b9e6b] hover:text-[#f0fdf4]"
+                    className={`rounded-md px-6 py-2 text-sm font-bold transition-colors ${
+                      activeHeatmapTeam === "home" ? "bg-green-400 text-black" : "text-[#829086] hover:text-[#f0fdf4]"
                     }`}
                   >
                     {analysis.homeTeam.name}
                   </button>
                   <button
                     onClick={() => setActiveHeatmapTeam("away")}
-                    className={`px-3 py-1.5 text-xs transition-colors ${
-                      activeHeatmapTeam === "away" ? "bg-green-400 text-black font-medium" : "text-[#6b9e6b] hover:text-[#f0fdf4]"
+                    className={`rounded-md px-6 py-2 text-sm font-bold transition-colors ${
+                      activeHeatmapTeam === "away" ? "bg-green-400 text-black" : "text-[#829086] hover:text-[#f0fdf4]"
                     }`}
                   >
                     {analysis.awayTeam.name}
                   </button>
                 </div>
               </div>
-                <div className="mx-auto max-w-4xl">
+              <div className="mx-auto max-w-7xl">
                 <Heatmap team={activeHeatmapTeam === "home" ? analysis.homeTeam : analysis.awayTeam} />
-                </div>
-              </div>
-              <div className={`${PANEL} p-5`}>
-                <div className={EYEBROW}>match events</div>
-                <h2 className="mt-2 text-xl font-black text-[#f0fdf4]">Timeline Review</h2>
-                <div className="mt-5">
-                  <EventTimeline
-                    events={analysis.keyEvents}
-                    selectedEventId={selectedEventId}
-                    selectedTimestamp={selectedFrame?.timestamp}
-                    onSelect={seekToEvent}
-                    homeTeamName={analysis.homeTeam.name}
-                    awayTeamName={analysis.awayTeam.name}
-                  />
-                </div>
               </div>
             </div>
 

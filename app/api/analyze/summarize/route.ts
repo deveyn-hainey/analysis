@@ -112,6 +112,25 @@ function buildEventConflicts(events: MatchEvent[]): MatchAnalysis["eventConflict
     }));
 }
 
+function scoreboardTeamName(teamId: TeamId, frames: FrameData[]) {
+  const counts = new Map<string, number>();
+  const key = teamId === "home" ? "homeLabel" : "awayLabel";
+
+  for (const frame of frames) {
+    const label = frame.scoreboard?.[key];
+    if (!label) continue;
+
+    const cleaned = label.trim().replace(/\s+/g, " ");
+    if (cleaned.length < 2 || cleaned.length > 20) continue;
+    if (/^\d+$/.test(cleaned)) continue;
+
+    counts.set(cleaned, (counts.get(cleaned) ?? 0) + 1);
+  }
+
+  const [best] = [...counts.entries()].sort((a, b) => b[1] - a[1])[0] ?? [];
+  return best ?? (teamId === "home" ? "Home Team" : "Away Team");
+}
+
 function buildTeamAnalysis(
   id: TeamId,
   frames: FrameData[],
@@ -146,7 +165,7 @@ function buildTeamAnalysis(
 
   return {
     id,
-    name: id === "home" ? "Home Team" : "Away Team",
+    name: scoreboardTeamName(id, frames),
     color: id === "home" ? "#3b82f6" : "#ef4444",
     formation: "4-3-3",
     averagePosition: { x: +avgX.toFixed(1), y: +avgY.toFixed(1) },

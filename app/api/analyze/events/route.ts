@@ -27,7 +27,7 @@ interface RawFrameUpdate {
   frameIndex: number;
   possession?: TeamId | "contested";
   events?: RawEvent[];
-  scoreboard?: { home: number; away: number } | null;
+  scoreboard?: { home: number; away: number; homeLabel?: string; awayLabel?: string } | null;
 }
 
 interface RawEventReview {
@@ -241,7 +241,7 @@ function synthesizeGoalsFromScoreboard(frames: FrameData[]): FrameData[] {
           timestamp: frame.timestamp,
           type: "goal",
           team,
-          description: `Scoreboard read ${frame.scoreboard.home}-${frame.scoreboard.away} — ${team === "home" ? "Home" : "Away"} goal confirmed from score overlay`,
+          description: `Scoreboard read ${frame.scoreboard.homeLabel ?? "Home"} ${frame.scoreboard.home}-${frame.scoreboard.away} ${frame.scoreboard.awayLabel ?? "Away"} — ${team === "home" ? frame.scoreboard.homeLabel ?? "Home" : frame.scoreboard.awayLabel ?? "Away"} goal confirmed from score overlay`,
           confidence: 0.92,
           isKeyMoment: true,
           evidenceUsed: [`scoreboard read ${seen} for ${team}, up from ${runningMax[team]} previously observed in this clip`],
@@ -758,6 +758,7 @@ Your job:
 SCOREBOARD READING (do this for every frame, separate from event confirmation):
 - Scan every corner/edge of the image for a score overlay, ticker, or graphic (e.g. "1-0", "USA 1 PAR 0").
 - If legible, report the exact numeric score as {"home": <int>, "away": <int>} using the same team labels as possession.
+- If the overlay includes team/country/club labels or abbreviations (e.g. "USA", "PAR", "STO", "ARS"), include them as "homeLabel" and "awayLabel". Use the exact visible label, trimmed to 2-20 characters. If labels are not legible, omit the label fields.
 - If no scoreboard is visible or you can't read it confidently, report it as null. Do not guess.
 - You do NOT need to compare this to other batches or remember prior scores — just report what this single frame shows. Score increases are detected deterministically downstream by comparing your readings across every frame in the clip, including frames reviewed in other batches. This means you don't need certainty about whether a score "changed" to report it — an accurate reading of a frame that already shows the post-goal score is exactly what's needed, even if you have no visual record of the goal itself.
 
@@ -767,7 +768,7 @@ Return ONLY valid JSON:
     {
       "frameIndex": 0,
       "possession": "home",
-      "scoreboard": { "home": 1, "away": 0 },
+      "scoreboard": { "home": 1, "away": 0, "homeLabel": "USA", "awayLabel": "PAR" },
       "events": [
         {
           "frameIndex": 0,
