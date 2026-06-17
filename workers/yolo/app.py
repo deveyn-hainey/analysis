@@ -4,7 +4,7 @@ import logging
 import os
 import tempfile
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, Optional, Union
 
 logger = logging.getLogger("yolo_worker")
 logging.basicConfig(level=logging.INFO)
@@ -137,7 +137,7 @@ class Detection:
     cls_name: str
     confidence: float
     xyxy: tuple[float, float, float, float]
-    tracker_id: int | None = None
+    tracker_id: Optional[int] = None
 
 
 def decode_frame(raw: str) -> Image.Image:
@@ -322,7 +322,7 @@ def analyze_single_frame(raw: RawFrame, frame_index: int) -> dict[str, Any]:
         best_ball = max(ball_detections, key=lambda d: d.confidence)
         ball_position = position_from_box(best_ball.xyxy, width, height)
 
-    possession: TeamId | Literal["contested"] = "contested"
+    possession: Union[TeamId, Literal["contested"]] = "contested"
     possessing_player = None
     if ball_position and players:
         nearest = min(
@@ -387,7 +387,7 @@ def analyze_precomputed_frame(
         best_ball = max(ball_detections, key=lambda d: d.confidence)
         ball_position = position_from_box(best_ball.xyxy, width, height)
 
-    possession: TeamId | Literal["contested"] = "contested"
+    possession: Union[TeamId, Literal["contested"]] = "contested"
     possessing_player = None
     if ball_position and players:
         nearest = min(
@@ -476,7 +476,7 @@ def analyze_video_file(
             all_cal_colors.extend(crop_mean_color(img, d.xyxy) for d in person_dets)
 
         # Build fixed centroids; fall back to per-frame clustering if too few players found.
-        global_centroids: tuple[np.ndarray, np.ndarray] | None = None
+        global_centroids: Optional[tuple[np.ndarray, np.ndarray]] = None
         if len(all_cal_colors) >= 4:
             cal_teams = split_teams(all_cal_colors)
             home_cols = [c for c, t in zip(all_cal_colors, cal_teams) if t == "home"]
