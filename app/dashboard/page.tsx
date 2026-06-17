@@ -11,7 +11,7 @@ import {
   AlertTriangle,
   Check,
 } from "lucide-react";
-import type { MatchAnalysis, FrameData, Player, Position } from "@/lib/types";
+import type { MatchAnalysis, FrameData, MatchEvent, Player, Position } from "@/lib/types";
 import SoccerField from "@/components/SoccerField";
 import FrameOverlay from "@/components/FrameOverlay";
 import EventTimeline from "@/components/EventTimeline";
@@ -656,6 +656,7 @@ function DashboardContent() {
   const searchParams = useSearchParams();
   const [analysis, setAnalysis] = useState<MatchAnalysis | null>(null);
   const [selectedFrame, setSelectedFrame] = useState<FrameData | null>(null);
+  const [selectedEventId, setSelectedEventId] = useState<string | undefined>(undefined);
   // Smoothly interpolated frame — updated at ~30fps via RAF for fluid overlay motion
   const [liveFrame, setLiveFrame] = useState<FrameData | null>(null);
   const [activeHeatmapTeam, setActiveHeatmapTeam] = useState<"home" | "away">("home");
@@ -781,6 +782,11 @@ function DashboardContent() {
     if (videoRef.current && videoUrl) {
       videoRef.current.currentTime = timestamp;
     }
+  };
+
+  const seekToEvent = (event: MatchEvent) => {
+    setSelectedEventId(event.id);
+    seekTo(event.timestamp);
   };
 
   const exportJson = () => {
@@ -1002,8 +1008,9 @@ function DashboardContent() {
                   <div className="mt-5">
                     <EventTimeline
                       events={analysis.keyEvents}
+                      selectedEventId={selectedEventId}
                       selectedTimestamp={selectedFrame?.timestamp}
-                      onSelect={seekTo}
+                      onSelect={seekToEvent}
                       homeTeamName={analysis.homeTeam.name}
                       awayTeamName={analysis.awayTeam.name}
                     />
@@ -1046,8 +1053,9 @@ function DashboardContent() {
                   <div className="mt-5">
                     <EventTimeline
                       events={analysis.keyEvents}
+                      selectedEventId={selectedEventId}
                       selectedTimestamp={selectedFrame?.timestamp}
-                      onSelect={seekTo}
+                      onSelect={seekToEvent}
                       homeTeamName={analysis.homeTeam.name}
                       awayTeamName={analysis.awayTeam.name}
                     />
@@ -1119,8 +1127,9 @@ function DashboardContent() {
                 <div className="mt-5">
                   <EventTimeline
                     events={analysis.keyEvents}
+                    selectedEventId={selectedEventId}
                     selectedTimestamp={selectedFrame?.timestamp}
-                    onSelect={seekTo}
+                    onSelect={seekToEvent}
                     homeTeamName={analysis.homeTeam.name}
                     awayTeamName={analysis.awayTeam.name}
                   />
