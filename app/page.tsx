@@ -17,6 +17,7 @@ import {
 import type { AnalyzeEventsRequest, AnalyzeFrameRequest, FrameData, MatchAnalysis, MatchEvent } from "@/lib/types";
 import { videoStore } from "@/lib/videoStore";
 import { frameImageStore } from "@/lib/frameImageStore";
+import { denseFrameStore } from "@/lib/denseFrameStore";
 
 const ACCEPTED_TYPES = ["video/mp4", "video/webm", "video/ogg", "video/quicktime"];
 const FRAME_ANALYSIS_CONCURRENCY = 4;
@@ -366,6 +367,36 @@ async function reviewEventsWithClaude(
   return { frames: preferScoreboardGoals(withScoreboardGoals), warnings: allWarnings };
 }
 
+// Fire-and-forget: upload the raw video file to the YOLO worker's /analyze-video
+// endpoint and stream the dense per-frame results into denseFrameStore. The user
+// is already on the dashboard by the time this resolves, and the RAF loop there
+// upgrades automatically once the store becomes "ready".
+async function fetchDenseTracking(file: File): Promise<void> {
+  if (!VISION_WORKER_URL) return;
+  denseFrameStore.setLoading();
+  try {
+    const form = new FormData();
+    form.append("file", file);
+    form.append("fps", "5");
+    const res = await fetch(`${VISION_WORKER_URL}/analyze-video`, {
+      method: "POST",
+      body: form,
+    });
+    if (!res.ok) {
+      denseFrameStore.setError();
+      return;
+    }
+    const data = (await res.json()) as { frames?: FrameData[] };
+    if (!data.frames || data.frames.length === 0) {
+      denseFrameStore.setError();
+      return;
+    }
+    denseFrameStore.setReady(data.frames);
+  } catch {
+    denseFrameStore.setError();
+  }
+}
+
 export default function HomePage() {
   const router = useRouter();
   const [dragOver, setDragOver] = useState(false);
@@ -474,6 +505,9 @@ export default function HomePage() {
         sessionStorage.setItem("matchAnalysis", JSON.stringify(analysis));
         setProgress(100);
         setStatus("done");
+        // Kick off dense per-frame tracking in the background — the dashboard
+        // RAF loop will upgrade from sparse interpolation once it resolves.
+        if (VISION_WORKER_URL) fetchDenseTracking(file);
         router.push("/dashboard");
       } catch (err) {
         setErrorMsg(err instanceof Error ? err.message : "Something went wrong.");

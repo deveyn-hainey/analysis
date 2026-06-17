@@ -25,6 +25,7 @@ import Heatmap from "@/components/Heatmap";
 import MetricCard from "@/components/MetricCard";
 import { videoStore } from "@/lib/videoStore";
 import { frameImageStore } from "@/lib/frameImageStore";
+import { denseFrameStore } from "@/lib/denseFrameStore";
 
 function formatDuration(s: number) {
   const m = Math.floor(s / 60);
@@ -174,6 +175,8 @@ function DashboardContent() {
   const [viewMode, setViewMode] = useState<ViewMode>("coach");
   const [pitchView, setPitchView] = useState<"frame" | "tactical">("tactical");
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
+  const [denseFrames, setDenseFrames] = useState<import("@/lib/types").FrameData[]>([]);
+  const [denseStatus, setDenseStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const videoRef = useRef<HTMLVideoElement>(null);
 
   useEffect(() => {
@@ -181,38 +184,62 @@ function DashboardContent() {
     setVideoUrl(url);
   }, []);
 
-  // RAF loop: reads video.currentTime at ~30fps, interpolates between the two
-  // surrounding sampled frames, and drives both the SVG overlay and SoccerField.
+  // Subscribe to dense frame store — fires whenever dense tracking status changes.
+  useEffect(() => {
+    const sync = () => {
+      setDenseFrames(denseFrameStore.getFrames());
+      setDenseStatus(denseFrameStore.getStatus());
+    };
+    sync(); // read current state immediately
+    return denseFrameStore.subscribe(sync);
+  }, []);
+
+  // RAF loop: reads video.currentTime at ~30fps and drives both the SVG overlay and SoccerField.
+  // When dense frames are available (5fps real detections) we snap to the nearest one.
+  // Otherwise we fall back to linear interpolation between sparse sampled keyframes.
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !analysis || !videoUrl) return;
 
-    const sorted = [...analysis.frames].sort((a, b) => a.timestamp - b.timestamp);
+    const sparseSorted = [...analysis.frames].sort((a, b) => a.timestamp - b.timestamp);
     let rafId: number;
     let lastWall = 0;
 
     const tick = () => {
       const now = performance.now();
-      if (now - lastWall >= 33) { // ~30fps
+      if (now - lastWall >= 33) { // ~30fps wall-clock gate
         lastWall = now;
         const t = video.currentTime;
 
-        // Find the two frames surrounding the current video time
-        let prevIdx = 0;
-        for (let i = 0; i < sorted.length - 1; i++) {
-          if (sorted[i].timestamp <= t) prevIdx = i;
-          else break;
-        }
-        const prev = sorted[prevIdx];
-        const next = sorted[Math.min(prevIdx + 1, sorted.length - 1)];
+        const dense = denseFrameStore.getFrames();
 
-        setSelectedFrame(prev);
-
-        if (prev === next || next.timestamp <= prev.timestamp) {
-          setLiveFrame(prev);
+        if (dense.length > 0) {
+          // Dense path: snap to the nearest frame by timestamp (no interpolation needed
+          // at 5fps — gap is only 200ms, imperceptible for tracking dots).
+          let best = dense[0];
+          let bestDist = Math.abs(best.timestamp - t);
+          for (let i = 1; i < dense.length; i++) {
+            const d = Math.abs(dense[i].timestamp - t);
+            if (d < bestDist) { best = dense[i]; bestDist = d; }
+          }
+          setSelectedFrame(best);
+          setLiveFrame(best);
         } else {
-          const alpha = Math.min(1, (t - prev.timestamp) / (next.timestamp - prev.timestamp));
-          setLiveFrame(interpolateFrame(prev, next, alpha));
+          // Sparse fallback: linear interpolation between the two surrounding keyframes.
+          let prevIdx = 0;
+          for (let i = 0; i < sparseSorted.length - 1; i++) {
+            if (sparseSorted[i].timestamp <= t) prevIdx = i;
+            else break;
+          }
+          const prev = sparseSorted[prevIdx];
+          const next = sparseSorted[Math.min(prevIdx + 1, sparseSorted.length - 1)];
+          setSelectedFrame(prev);
+          if (prev === next || next.timestamp <= prev.timestamp) {
+            setLiveFrame(prev);
+          } else {
+            const alpha = Math.min(1, (t - prev.timestamp) / (next.timestamp - prev.timestamp));
+            setLiveFrame(interpolateFrame(prev, next, alpha));
+          }
         }
       }
       rafId = requestAnimationFrame(tick);
@@ -220,7 +247,7 @@ function DashboardContent() {
 
     rafId = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(rafId);
-  }, [analysis, videoUrl]);
+  }, [analysis, videoUrl, denseFrames]);
 
   useEffect(() => {
     const stored = sessionStorage.getItem("matchAnalysis");
@@ -287,8 +314,14 @@ function DashboardContent() {
             {pitchView === "tactical" ? "Tracking + Tactical" : "Frame View"}
           </h2>
           {pitchView === "tactical" && videoUrl && (
-            <p className="text-xs text-[#6b9e6b] mt-0.5">
+            <p className="text-xs text-[#6b9e6b] mt-0.5 flex items-center gap-1.5">
               Player overlay and field sync to playback in real time
+              {denseStatus === "loading" && (
+                <span className="text-yellow-400 animate-pulse">· dense tracking loading…</span>
+              )}
+              {denseStatus === "ready" && (
+                <span className="text-green-400">· {denseFrames.length} dense frames active</span>
+              )}
             </p>
           )}
           {pitchView === "frame" && currentFrame && (

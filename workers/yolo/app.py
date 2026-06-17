@@ -2,6 +2,7 @@ import base64
 import io
 import logging
 import os
+import tempfile
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -11,8 +12,9 @@ logging.basicConfig(level=logging.INFO)
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 os.environ.setdefault("YOLO_CONFIG_DIR", "/tmp/Ultralytics")
 
+import cv2
 import numpy as np
-from fastapi import FastAPI
+from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from PIL import Image
@@ -383,6 +385,132 @@ def analyze_precomputed_frame(
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok", "model": MODEL_PATH}
+
+
+@app.post("/analyze-video")
+def analyze_video_file(
+    file: UploadFile = File(...),
+    fps: float = Form(default=5.0),
+) -> dict[str, Any]:
+    """Accept a raw video file and return dense per-frame tracking data.
+
+    Two-pass approach:
+    1. Sample ~30 evenly-spaced frames to establish stable global team-colour
+       centroids (avoids the per-frame flickering that happens when a single
+       unbalanced frame shifts the brightness-split clustering).
+    2. Extract frames at `fps` (default 5) and classify every player using the
+       global centroids, returning the dense FrameData array.
+    """
+    suffix = "." + (file.filename.rsplit(".", 1)[-1] if file.filename and "." in file.filename else "mp4")
+    content = file.file.read()
+
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        tmp.write(content)
+        tmp_path = tmp.name
+
+    try:
+        cap = cv2.VideoCapture(tmp_path)
+        if not cap.isOpened():
+            return {"error": "Could not open video", "frames": []}
+
+        video_fps: float = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        frame_step = max(1, round(video_fps / fps))
+
+        logger.info(
+            "analyze-video: %.1ffps video, target %.1ffps, step=%d, %d total → ~%d output frames",
+            video_fps, fps, frame_step, total_frames, max(1, total_frames // frame_step),
+        )
+
+        # ── Pass 1: calibration — pool colours from ~30 spread-out frames ──────
+        n_cal = 30
+        cal_step = max(1, total_frames // n_cal)
+        cal_indices = list(range(0, total_frames, cal_step))[:n_cal]
+        all_cal_colors: list[np.ndarray] = []
+
+        for idx in cal_indices:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+            ret, bgr = cap.read()
+            if not ret:
+                continue
+            img = Image.fromarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+            dets = detections_for_image(img)
+            person_dets = [
+                d for d in dets
+                if d.cls_name in PLAYER_CLASSES and d.cls_name not in REFEREE_CLASSES
+            ]
+            all_cal_colors.extend(crop_mean_color(img, d.xyxy) for d in person_dets)
+
+        # Build fixed centroids; fall back to per-frame clustering if too few players found.
+        global_centroids: tuple[np.ndarray, np.ndarray] | None = None
+        if len(all_cal_colors) >= 4:
+            cal_teams = split_teams(all_cal_colors)
+            home_cols = [c for c, t in zip(all_cal_colors, cal_teams) if t == "home"]
+            away_cols = [c for c, t in zip(all_cal_colors, cal_teams) if t == "away"]
+            if home_cols and away_cols:
+                global_centroids = (
+                    np.stack(home_cols).mean(axis=0),
+                    np.stack(away_cols).mean(axis=0),
+                )
+                logger.info(
+                    "analyze-video: global centroids home=%s away=%s",
+                    global_centroids[0].round(1).tolist(),
+                    global_centroids[1].round(1).tolist(),
+                )
+
+        # ── Pass 2: dense tracking at target fps ────────────────────────────────
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        dense_frames: list[dict[str, Any]] = []
+        frame_idx = 0
+        output_idx = 0
+
+        while True:
+            ret, bgr = cap.read()
+            if not ret:
+                break
+
+            if frame_idx % frame_step == 0:
+                timestamp = round(frame_idx / video_fps, 3)
+                img = Image.fromarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+                dets = detections_for_image(img)
+                person_dets = [
+                    d for d in dets
+                    if d.cls_name in PLAYER_CLASSES and d.cls_name not in REFEREE_CLASSES
+                ]
+                colors = [crop_mean_color(img, d.xyxy) for d in person_dets]
+
+                if global_centroids and colors:
+                    home_c, away_c = global_centroids
+                    teams: list[TeamId] = [
+                        "home" if np.linalg.norm(c - home_c) <= np.linalg.norm(c - away_c) else "away"
+                        for c in colors
+                    ]
+                else:
+                    teams = split_teams(colors)
+
+                raw = RawFrame(base64="", timestamp=timestamp)
+                dense_frames.append(
+                    analyze_precomputed_frame(raw, output_idx, img, dets, teams)
+                )
+                output_idx += 1
+
+                if output_idx % 50 == 0:
+                    logger.info(
+                        "analyze-video: %d / ~%d frames processed",
+                        output_idx, max(1, total_frames // frame_step),
+                    )
+
+            frame_idx += 1
+
+        cap.release()
+        logger.info("analyze-video: complete — %d dense frames", len(dense_frames))
+        return {"frames": dense_frames, "videoFps": video_fps, "targetFps": fps}
+
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
 
 
 @app.post("/analyze-frames")
