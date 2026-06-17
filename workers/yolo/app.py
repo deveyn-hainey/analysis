@@ -51,6 +51,10 @@ REFEREE_CLASSES = {name.strip().lower() for name in os.getenv("YOLO_REFEREE_CLAS
 DEFAULT_DENSE_FPS = float(os.getenv("YOLO_DENSE_FPS", "15"))
 TRACK_SMOOTHING_ALPHA = float(os.getenv("YOLO_TRACK_SMOOTHING_ALPHA", "0.35"))
 BALL_INTERPOLATION_LIMIT = int(os.getenv("YOLO_BALL_INTERPOLATION_LIMIT", "30"))
+# Max consecutive frames a player can be missing before we stop coasting their
+# position. ~0.7s at 15fps — long enough to bridge occlusion blips, short enough
+# not to leave a ghost where a player has actually left the frame.
+PLAYER_INTERPOLATION_LIMIT = int(os.getenv("YOLO_PLAYER_INTERPOLATION_LIMIT", "10"))
 MAX_PLAYERS_PER_TEAM = int(os.getenv("YOLO_MAX_PLAYERS_PER_TEAM", "11"))
 
 app = FastAPI(title="SoccerVision YOLO Worker")
@@ -166,34 +170,136 @@ def position_from_box(
     }
 
 
-def crop_mean_color(image: Image.Image, box: tuple[float, float, float, float]) -> np.ndarray:
+def crop_jersey_features(image: Image.Image, box: tuple[float, float, float, float]) -> np.ndarray:
+    """Return a normalised HSV histogram of the upper-body (jersey) region.
+
+    Using the upper 55% of the bounding box captures the shirt while excluding
+    shorts and legs, whose colours are far more uniform and less discriminative.
+    A 16-bin histogram per channel (H, S, V) gives a 48-dim feature vector that
+    is robust to brightness variation — two differently-lit white jerseys will
+    cluster together, unlike a single brightness mean which would drift.
+    """
     x1, y1, x2, y2 = [int(v) for v in box]
-    upper_y2 = y1 + max(1, (y2 - y1) // 2)
-    crop = np.asarray(image.crop((x1, y1, x2, upper_y2)))
-    if crop.size == 0:
-        return np.array([128.0, 128.0, 128.0])
-    return crop.reshape(-1, 3).mean(axis=0)
+    jersey_y2 = y1 + max(1, int((y2 - y1) * 0.55))
+    crop_rgb = np.asarray(image.crop((x1, y1, x2, jersey_y2)))
+    if crop_rgb.size == 0:
+        return np.zeros(48, dtype=np.float32)
+    crop_bgr = cv2.cvtColor(crop_rgb, cv2.COLOR_RGB2BGR)
+    hsv = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2HSV)
+    h_hist = cv2.calcHist([hsv], [0], None, [16], [0, 180]).flatten()
+    s_hist = cv2.calcHist([hsv], [1], None, [16], [0, 256]).flatten()
+    v_hist = cv2.calcHist([hsv], [2], None, [16], [0, 256]).flatten()
+    hist = np.concatenate([h_hist, s_hist, v_hist]).astype(np.float32)
+    total = hist.sum()
+    return hist / (total + 1e-6)
 
 
-def split_teams(colors: list[np.ndarray]) -> list[TeamId]:
-    if not colors:
+# Green-pitch HSV gate. OpenCV hue is 0-180; grass sits roughly 25-95 across
+# sunlit/shadowed/yellowed pitches. Tunable via env without code changes.
+PITCH_HSV_LOWER = np.array(
+    [int(v) for v in os.getenv("YOLO_PITCH_HSV_LOWER", "25,25,25").split(",")], dtype=np.uint8
+)
+PITCH_HSV_UPPER = np.array(
+    [int(v) for v in os.getenv("YOLO_PITCH_HSV_UPPER", "95,255,255").split(",")], dtype=np.uint8
+)
+# If the largest green region covers less than this fraction of the frame we
+# assume it isn't a wide pitch shot (replay closeup, goalmouth scramble) and skip
+# filtering entirely rather than risk dropping every real player.
+PITCH_MIN_AREA_FRAC = float(os.getenv("YOLO_PITCH_MIN_AREA_FRAC", "0.10"))
+PITCH_FILTER_ENABLED = os.getenv("YOLO_PITCH_FILTER", "1") not in ("0", "false", "False")
+
+
+def compute_pitch_mask(image: Image.Image) -> Optional[np.ndarray]:
+    """Return a filled binary mask of the playing surface, or None if no clear pitch.
+
+    The pitch is the single largest contiguous green region. Filling its contour
+    means players, lines and the centre circle (which are not green) still count as
+    "on pitch", while the crowd, dugouts, sidelines and advertising boards — the
+    main source of phantom player detections from a generic COCO model — fall
+    outside it and get rejected downstream.
+    """
+    if not PITCH_FILTER_ENABLED:
+        return None
+    rgb = np.asarray(image)
+    hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
+    mask = cv2.inRange(hsv, PITCH_HSV_LOWER, PITCH_HSV_UPPER)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (25, 25))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+    biggest = max(contours, key=cv2.contourArea)
+    if cv2.contourArea(biggest) < PITCH_MIN_AREA_FRAC * mask.size:
+        return None
+
+    filled = np.zeros_like(mask)
+    cv2.drawContours(filled, [biggest], -1, 255, thickness=cv2.FILLED)
+    # Dilate so players standing right on the touchline aren't clipped out.
+    return cv2.dilate(filled, kernel)
+
+
+def foot_on_pitch(box: tuple[float, float, float, float], mask: np.ndarray) -> bool:
+    """True if the detection's foot point (bottom-centre of box) lands on the pitch."""
+    x1, y1, x2, y2 = box
+    fx = int((x1 + x2) / 2)
+    fy = int(y2)
+    h, w = mask.shape[:2]
+    fx = max(0, min(w - 1, fx))
+    fy = max(0, min(h - 1, fy))
+    return bool(mask[fy, fx])
+
+
+def filter_persons_to_pitch(image: Image.Image, detections: list[Detection]) -> list[Detection]:
+    """Drop person detections whose feet aren't on the pitch; keep ball/others as-is.
+
+    This is the main defence against over-tracking: a generic COCO model reports
+    every spectator and bench player as a "person", and those flickering detections
+    are what make ByteTrack's IDs churn and the overlay flash. Removing them leaves
+    a stable ~22-player set that tracks cleanly.
+    """
+    mask = compute_pitch_mask(image)
+    if mask is None:
+        return detections
+    kept: list[Detection] = []
+    for d in detections:
+        if d.cls_name in PLAYER_CLASSES and d.cls_name not in BALL_CLASSES:
+            if not foot_on_pitch(d.xyxy, mask):
+                continue
+        kept.append(d)
+    return kept
+
+
+def split_teams(features: list[np.ndarray]) -> list[TeamId]:
+    """Assign team labels via K-means (k=2) on jersey HSV histogram features.
+
+    Initialises the two centroids by picking the pair of detections that are
+    furthest apart in feature space, which is more stable than a brightness-based
+    seed when both teams wear similarly dark or light kits.
+    """
+    if not features:
         return []
-    if len(colors) == 1:
+    if len(features) == 1:
         return ["home"]
 
-    brightness = np.array([color.mean() for color in colors])
-    dark_idx = int(brightness.argmin())
-    light_idx = int(brightness.argmax())
-    centroids = np.stack([colors[light_idx], colors[dark_idx]]).astype(float)
+    X = np.stack(features).astype(float)
 
-    labels = np.zeros(len(colors), dtype=int)
-    for _ in range(6):
-        distances = np.stack([np.linalg.norm(np.stack(colors) - c, axis=1) for c in centroids], axis=1)
-        labels = distances.argmin(axis=1)
+    # Seed: centroid 0 = first sample, centroid 1 = sample most distant from it.
+    dists_from_first = np.linalg.norm(X - X[0], axis=1)
+    seed1_idx = int(dists_from_first.argmax())
+    centroids = np.stack([X[0], X[seed1_idx]])
+
+    labels = np.zeros(len(features), dtype=int)
+    for _ in range(10):
+        dists = np.stack([np.linalg.norm(X - c, axis=1) for c in centroids], axis=1)
+        new_labels = dists.argmin(axis=1)
+        if np.array_equal(new_labels, labels):
+            break
+        labels = new_labels
         for label in (0, 1):
-            members = [colors[i] for i, value in enumerate(labels) if value == label]
-            if members:
-                centroids[label] = np.stack(members).mean(axis=0)
+            members = X[labels == label]
+            if len(members):
+                centroids[label] = members.mean(axis=0)
 
     return ["home" if label == 0 else "away" for label in labels]
 
@@ -252,7 +358,7 @@ def stabilize_player_ids(
     frame: dict[str, Any],
     tracks: dict[TeamId, list[TrackState]],
     next_ids: dict[TeamId, int],
-    max_jump: float = 16.0,
+    max_jump: float = 20.0,
 ) -> dict[str, Any]:
     """Assign stable hN/aN IDs and smooth positions across tracker dropouts."""
     timestamp = float(frame["timestamp"])
@@ -284,7 +390,7 @@ def stabilize_player_ids(
                     best_cost = 0
                     break
                 age = timestamp - float(track["last_seen"])
-                if age > 8.0:
+                if age > 10.0:
                     continue
                 cost = pitch_distance(player["position"], track["position"]) + age * 1.5
                 if cost < best_cost:
@@ -380,6 +486,80 @@ def interpolate_ball_positions(frames: list[dict[str, Any]], limit: int = BALL_I
             }
             frames[start_idx + offset]["ballInterpolated"] = True
 
+    return frames
+
+
+def consolidate_player_teams(frames: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Lock each stable player ID to a single team for the whole clip.
+
+    Per-frame jersey clustering can occasionally flip a player home<->away for a
+    single frame, which makes them jump across the tactical view. We tally a
+    confidence-weighted vote per ID across every frame it appears in and rewrite
+    the team (and role) to the majority, so a given player keeps one colour for
+    the entire clip.
+    """
+    votes: dict[str, dict[TeamId, float]] = {}
+    for frame in frames:
+        for player in frame["players"]:
+            weight = float(player.get("detectionConfidence", 0.0)) or 1.0
+            tally = votes.setdefault(player["id"], {"home": 0.0, "away": 0.0})
+            tally[player["team"]] += weight
+
+    majority: dict[str, TeamId] = {
+        pid: ("home" if tally["home"] >= tally["away"] else "away")
+        for pid, tally in votes.items()
+    }
+
+    for frame in frames:
+        for player in frame["players"]:
+            team = majority.get(player["id"], player["team"])
+            player["team"] = team
+            player["role"] = player_role(player["position"], team)
+        if frame.get("possessingPlayer"):
+            pid = frame["possessingPlayer"].get("playerId")
+            if pid in majority:
+                frame["possessingPlayer"]["team"] = majority[pid]
+    return frames
+
+
+def interpolate_player_positions(
+    frames: list[dict[str, Any]], limit: int = PLAYER_INTERPOLATION_LIMIT
+) -> list[dict[str, Any]]:
+    """Bridge short detection gaps per player so tracks don't flicker on/off.
+
+    YOLO misses the odd frame when players overlap or blur; ByteTrack keeps the ID
+    alive internally but emits no box, so the player vanishes for a frame or two and
+    the overlay flashes. For each stable ID we linearly interpolate a position into
+    the missing frames between two real sightings (gap <= limit), mark it inferred,
+    and re-cap each frame to a plausible XI.
+    """
+    appearances: dict[str, list[tuple[int, dict[str, Any]]]] = {}
+    for idx, frame in enumerate(frames):
+        for player in frame["players"]:
+            appearances.setdefault(player["id"], []).append((idx, player))
+
+    for pid, seen in appearances.items():
+        for (start_idx, start_p), (end_idx, end_p) in zip(seen, seen[1:]):
+            gap = end_idx - start_idx - 1
+            if gap <= 0 or gap > limit:
+                continue
+            for offset in range(1, gap + 1):
+                alpha = offset / (gap + 1)
+                position = {
+                    "x": round(start_p["position"]["x"] * (1 - alpha) + end_p["position"]["x"] * alpha, 1),
+                    "y": round(start_p["position"]["y"] * (1 - alpha) + end_p["position"]["y"] * alpha, 1),
+                }
+                frames[start_idx + offset]["players"].append({
+                    **start_p,
+                    "position": position,
+                    "role": player_role(position, start_p["team"]),
+                    # Slightly below a real detection so pruning prefers live boxes.
+                    "detectionConfidence": round(float(start_p.get("detectionConfidence", 0.5)) * 0.9, 3),
+                    "inferred": True,
+                })
+
+    for frame in frames:
+        frame["players"] = prune_team_players(frame["players"])
     return frames
 
 
@@ -482,15 +662,15 @@ def detections_for_ultralytics_result(result: Any) -> list[Detection]:
 def analyze_single_frame(raw: RawFrame, frame_index: int) -> dict[str, Any]:
     image = decode_frame(raw.base64)
     width, height = image.size
-    detections = detections_for_image(image)
+    detections = filter_persons_to_pitch(image, detections_for_image(image))
 
     person_detections = [
         d for d in detections
         if d.cls_name in PLAYER_CLASSES and d.cls_name not in REFEREE_CLASSES
     ]
     ball_detections = [d for d in detections if d.cls_name in BALL_CLASSES]
-    colors = [crop_mean_color(image, d.xyxy) for d in person_detections]
-    teams = split_teams(colors)
+    features = [crop_jersey_features(image, d.xyxy) for d in person_detections]
+    teams = split_teams(features)
 
     players: list[dict[str, Any]] = []
     team_counts: dict[TeamId, int] = {"home": 0, "away": 0}
@@ -658,7 +838,7 @@ def analyze_video_file(
         n_cal = 30
         cal_step = max(1, total_frames // n_cal)
         cal_indices = list(range(0, total_frames, cal_step))[:n_cal]
-        all_cal_colors: list[np.ndarray] = []
+        all_cal_features: list[np.ndarray] = []
 
         for idx in cal_indices:
             cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
@@ -666,28 +846,27 @@ def analyze_video_file(
             if not ret:
                 continue
             img = Image.fromarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
-            dets = detections_for_image(img)
+            dets = filter_persons_to_pitch(img, detections_for_image(img))
             person_dets = [
                 d for d in dets
                 if d.cls_name in PLAYER_CLASSES and d.cls_name not in REFEREE_CLASSES
             ]
-            all_cal_colors.extend(crop_mean_color(img, d.xyxy) for d in person_dets)
+            all_cal_features.extend(crop_jersey_features(img, d.xyxy) for d in person_dets)
 
         # Build fixed centroids; fall back to per-frame clustering if too few players found.
         global_centroids: Optional[tuple[np.ndarray, np.ndarray]] = None
-        if len(all_cal_colors) >= 4:
-            cal_teams = split_teams(all_cal_colors)
-            home_cols = [c for c, t in zip(all_cal_colors, cal_teams) if t == "home"]
-            away_cols = [c for c, t in zip(all_cal_colors, cal_teams) if t == "away"]
-            if home_cols and away_cols:
+        if len(all_cal_features) >= 4:
+            cal_teams = split_teams(all_cal_features)
+            home_feats = [f for f, t in zip(all_cal_features, cal_teams) if t == "home"]
+            away_feats = [f for f, t in zip(all_cal_features, cal_teams) if t == "away"]
+            if home_feats and away_feats:
                 global_centroids = (
-                    np.stack(home_cols).mean(axis=0),
-                    np.stack(away_cols).mean(axis=0),
+                    np.stack(home_feats).mean(axis=0),
+                    np.stack(away_feats).mean(axis=0),
                 )
                 logger.info(
-                    "analyze-video: global centroids home=%s away=%s",
-                    global_centroids[0].round(1).tolist(),
-                    global_centroids[1].round(1).tolist(),
+                    "analyze-video: global HSV centroids built — home n=%d, away n=%d",
+                    len(home_feats), len(away_feats),
                 )
 
         # ── Pass 2: dense tracking at target fps ────────────────────────────────
@@ -698,7 +877,7 @@ def analyze_video_file(
         previous_possession: Union[TeamId, Literal["contested"]] = "contested"
 
         if not use_huggingface_yolov5():
-            tracker_config = os.getenv("YOLO_TRACKER", "bytetrack.yaml")
+            tracker_config = os.getenv("YOLO_TRACKER", "bytetrack_soccer.yaml")
             tracked_results = model.track(
                 source=tmp_path,
                 stream=True,
@@ -713,21 +892,21 @@ def analyze_video_file(
             for output_idx, result in enumerate(tracked_results):
                 timestamp = round((output_idx * frame_step) / video_fps, 3)
                 img = Image.fromarray(cv2.cvtColor(result.orig_img, cv2.COLOR_BGR2RGB))
-                dets = detections_for_ultralytics_result(result)
+                dets = filter_persons_to_pitch(img, detections_for_ultralytics_result(result))
                 person_dets = [
                     d for d in dets
                     if d.cls_name in PLAYER_CLASSES and d.cls_name not in REFEREE_CLASSES
                 ]
-                colors = [crop_mean_color(img, d.xyxy) for d in person_dets]
+                frame_features = [crop_jersey_features(img, d.xyxy) for d in person_dets]
 
-                if global_centroids and colors:
+                if global_centroids and frame_features:
                     home_c, away_c = global_centroids
                     teams: list[TeamId] = [
-                        "home" if np.linalg.norm(c - home_c) <= np.linalg.norm(c - away_c) else "away"
-                        for c in colors
+                        "home" if np.linalg.norm(f - home_c) <= np.linalg.norm(f - away_c) else "away"
+                        for f in frame_features
                     ]
                 else:
-                    teams = split_teams(colors)
+                    teams = split_teams(frame_features)
 
                 raw = RawFrame(base64="", timestamp=timestamp)
                 frame = analyze_precomputed_frame(raw, output_idx, img, dets, teams)
@@ -753,7 +932,7 @@ def analyze_video_file(
                 if frame_idx % frame_step == 0:
                     timestamp = round(frame_idx / video_fps, 3)
                     img = Image.fromarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
-                    dets = detections_for_image(img)
+                    dets = filter_persons_to_pitch(img, detections_for_image(img))
                     person_dets = [
                         d for d in dets
                         if d.cls_name in PLAYER_CLASSES and d.cls_name not in REFEREE_CLASSES
@@ -786,6 +965,8 @@ def analyze_video_file(
                 frame_idx += 1
 
         cap.release()
+        dense_frames = consolidate_player_teams(dense_frames)
+        dense_frames = interpolate_player_positions(dense_frames)
         dense_frames = recompute_possession_for_frames(interpolate_ball_positions(dense_frames))
         logger.info("analyze-video: complete — %d dense frames", len(dense_frames))
         return {"frames": dense_frames, "videoFps": video_fps, "targetFps": fps}
@@ -811,18 +992,22 @@ def analyze_frames(request: AnalyzeFramesRequest) -> dict[str, Any]:
     previous_possession: Union[TeamId, Literal["contested"]] = "contested"
     for i, raw_frame in enumerate(request.frames):
         image = decode_frame(raw_frame.base64)
-        detections = detections_for_image(image)
+        detections = filter_persons_to_pitch(image, detections_for_image(image))
         person_detections = [
             d for d in detections
             if d.cls_name in PLAYER_CLASSES and d.cls_name not in REFEREE_CLASSES
         ]
-        colors = [crop_mean_color(image, d.xyxy) for d in person_detections]
-        teams = split_teams(colors)
+        features = [crop_jersey_features(image, d.xyxy) for d in person_detections]
+        teams = split_teams(features)
         frame = analyze_precomputed_frame(raw_frame, i, image, detections, teams)
         frame = stabilize_player_ids(frame, tracks, next_ids)
         frame["possession"] = smooth_possession(frame, previous_possession)
         previous_possession = frame["possession"]
         frames.append(frame)
+
+    frames = consolidate_player_teams(frames)
+    frames = interpolate_player_positions(frames)
+    frames = recompute_possession_for_frames(interpolate_ball_positions(frames))
 
     return {
         "processingMethod": "yolo-worker",

@@ -1,0 +1,13 @@
+# ByteTrack config tuned for soccer broadcast footage.
+# Key changes vs ultralytics default:
+#   track_buffer: 120  — holds lost tracks for ~4s at 30fps, recovering player IDs
+#                        after occlusion by other players or camera cuts.
+#   match_thresh: 0.6  — tighter IoU gate reduces cross-team ID swaps on crowded
+#                        sequences near the penalty area.
+tracker_type: bytetrack
+track_high_thresh: 0.25
+track_low_thresh: 0.1
+new_track_thresh: 0.25
+track_buffer: 120
+match_thresh: 0.6
+fuse_score: True

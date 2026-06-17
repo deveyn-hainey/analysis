@@ -123,6 +123,13 @@ function matchPlayersByTeamAndDistance(aPlayers: Player[], bPlayers: Player[], m
   const used = new Set<string>();
 
   return aPlayers.map((player) => {
+    // ID-first: if the same stable ID exists in the target frame, use it directly.
+    const idMatch = bPlayers.find((p) => p.id === player.id && !used.has(p.id));
+    if (idMatch) {
+      used.add(idMatch.id);
+      return { player, match: idMatch };
+    }
+
     let best: Player | undefined;
     let bestDistance = Number.POSITIVE_INFINITY;
 
@@ -145,11 +152,12 @@ function matchPlayersByTeamAndDistance(aPlayers: Player[], bPlayers: Player[], m
 }
 
 function interpolateFrame(a: FrameData, b: FrameData, alpha: number): FrameData {
-  const matches = matchPlayersByTeamAndDistance(a.players, b.players, 26);
+  // ID-first: stable IDs from the worker should now match directly.
+  // Fall back to nearest-same-team distance only when an ID has dropped out.
+  const bById = new Map(b.players.map((p) => [p.id, p]));
   const players = a.players.map((player) => {
-    const match =
-      b.players.find((p) => p.team === player.team && player.number > 0 && p.number === player.number) ??
-      matches.find((entry) => entry.player.id === player.id)?.match;
+    const match = bById.get(player.id) ??
+      b.players.find((p) => p.team === player.team && player.number > 0 && p.number === player.number);
     if (!match) return player;
     return {
       ...player,
@@ -187,11 +195,12 @@ function interpolateDenseFrame(frames: FrameData[], timestamp: number): FrameDat
 function easeDisplayedFrame(previous: FrameData | null, target: FrameData): FrameData {
   if (!previous || Math.abs(previous.timestamp - target.timestamp) > 1) return target;
 
-  const matches = matchPlayersByTeamAndDistance(previous.players, target.players, 12);
+  // Match purely by ID — stable IDs from the worker make this reliable and avoid
+  // the contradictory distance thresholds that caused visual jitter before.
+  const prevById = new Map(previous.players.map((p) => [p.id, p]));
   const smoothedPlayers = target.players.map((player) => {
-    const prev = matches.find((entry) => entry.match?.id === player.id)?.player;
+    const prev = prevById.get(player.id);
     if (!prev) return player;
-
     return {
       ...player,
       position: lerpPosition(prev.position, player.position, 0.42),
@@ -632,12 +641,15 @@ function ShotMapPanel({ analysis }: { analysis: MatchAnalysis }) {
   );
 }
 
-function PassNetworkPanel({ frames, currentFrame, teamName }: { frames: FrameData[]; currentFrame: FrameData; teamName: string }) {
-  const startTime = Math.max(0, currentFrame.timestamp - 20);
-  const recentFrames = frames.filter((frame) => frame.timestamp >= startTime && frame.timestamp <= currentFrame.timestamp);
-  const networkFrames = recentFrames.length >= 2 ? recentFrames : frames.filter((frame) => frame.timestamp <= currentFrame.timestamp);
-  const network = buildPassNetwork(networkFrames.length ? networkFrames : [currentFrame], "home");
-  const currentPlayers = currentFrame.players.filter((player) => player.team === "home").slice(0, 11);
+function PassNetworkPanel({ frames, currentFrame, homeTeamName, awayTeamName }: { frames: FrameData[]; currentFrame: FrameData; homeTeamName: string; awayTeamName: string }) {
+  const [selectedTeam, setSelectedTeam] = useState<"home" | "away">("home");
+  const teamName = selectedTeam === "home" ? homeTeamName : awayTeamName;
+
+  // Use all frames up to the current playback position — stable full-match window
+  // prevents the network from resetting as the user scrubs through the video.
+  const networkFrames = frames.filter((frame) => frame.timestamp <= currentFrame.timestamp);
+  const network = buildPassNetwork(networkFrames.length ? networkFrames : [currentFrame], selectedTeam);
+  const currentPlayers = currentFrame.players.filter((player) => player.team === selectedTeam).slice(0, 11);
   const nodes = (network.nodes.length
     ? network.nodes
     : currentPlayers.map((player) => ({
@@ -666,11 +678,32 @@ function PassNetworkPanel({ frames, currentFrame, teamName }: { frames: FrameDat
     .slice(0, Math.min(10, Math.max(0, nodes.length - 2)));
   const links = realLinks.length >= 3 ? realLinks : estimatedLinks;
   const linksAreEstimated = realLinks.length < 3;
+  const nodeColor = selectedTeam === "home" ? "#59d879" : "#ef4444";
+  const nodeStroke = selectedTeam === "home" ? "#78f09a" : "#f87171";
+  const linkColor = selectedTeam === "home" ? "#5ee178" : "#f87171";
 
   return (
     <div className={`${PANEL} p-6`}>
-      <div className={EYEBROW}>pass network - {teamName}</div>
-      <h2 className="mt-3 text-xl font-black text-[#f0fdf4]">Average Positions & Links</h2>
+      <div className="flex items-center justify-between gap-4">
+        <div>
+          <div className={EYEBROW}>pass network - {teamName}</div>
+          <h2 className="mt-3 text-xl font-black text-[#f0fdf4]">Average Positions & Links</h2>
+        </div>
+        <div className="flex rounded-lg overflow-hidden border border-[#1c3020] text-xs">
+          <button
+            onClick={() => setSelectedTeam("home")}
+            className={`px-3 py-1.5 transition-colors ${selectedTeam === "home" ? "bg-green-400 text-black font-medium" : "text-[#6b9e6b] hover:text-[#f0fdf4]"}`}
+          >
+            {homeTeamName}
+          </button>
+          <button
+            onClick={() => setSelectedTeam("away")}
+            className={`px-3 py-1.5 transition-colors ${selectedTeam === "away" ? "bg-red-400 text-black font-medium" : "text-[#6b9e6b] hover:text-[#f0fdf4]"}`}
+          >
+            {awayTeamName}
+          </button>
+        </div>
+      </div>
       <div className="relative mx-auto mt-8 aspect-[700/454] max-w-4xl rounded-lg bg-[#09110c]">
         <PitchLines />
         <svg viewBox="0 0 700 454" className="absolute inset-0 h-full w-full">
@@ -685,7 +718,7 @@ function PassNetworkPanel({ frames, currentFrame, teamName }: { frames: FrameDat
                 y1={node.position.y * 4.54}
                 x2={next.position.x * 7}
                 y2={next.position.y * 4.54}
-                stroke="#5ee178"
+                stroke={linkColor}
                 strokeWidth={linksAreEstimated ? 3 : 1.5 + Math.min(5, link.count)}
                 opacity={linksAreEstimated ? 0.42 : 0.32}
               />
@@ -693,7 +726,7 @@ function PassNetworkPanel({ frames, currentFrame, teamName }: { frames: FrameDat
           })}
           {nodes.map((node, i) => (
             <g key={node.id}>
-              <circle cx={node.position.x * 7} cy={node.position.y * 4.54} r={14 + (node.touches / maxTouches) * 13} fill="#59d879" fillOpacity={0.72} stroke="#78f09a" strokeWidth={2} />
+              <circle cx={node.position.x * 7} cy={node.position.y * 4.54} r={14 + (node.touches / maxTouches) * 13} fill={nodeColor} fillOpacity={0.72} stroke={nodeStroke} strokeWidth={2} />
               <text x={node.position.x * 7} y={node.position.y * 4.54 + 5} textAnchor="middle" fill="#061008" fontSize={13} fontWeight={900}>
                 {node.number || i + 1}
               </text>
@@ -1193,7 +1226,7 @@ function DashboardContent() {
 
             <div className="grid lg:grid-cols-2 gap-4">
               {tacticalFramePanel}
-              <PassNetworkPanel frames={denseFrames.length ? denseFrames : analysis.frames} currentFrame={displayFrame} teamName={analysis.homeTeam.name} />
+              <PassNetworkPanel frames={denseFrames.length ? denseFrames : analysis.frames} currentFrame={displayFrame} homeTeamName={analysis.homeTeam.name} awayTeamName={analysis.awayTeam.name} />
             </div>
 
             <div className="grid lg:grid-cols-[1.35fr_0.65fr] gap-4">
