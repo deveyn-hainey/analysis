@@ -217,13 +217,23 @@ async function analyzeFramesWithWorker(rawFrames: RawFrame[]): Promise<FrameData
 function synthesizeGoalsFromScoreboard(frames: FrameData[]): FrameData[] {
   const sorted = [...frames].sort((a, b) => a.timestamp - b.timestamp);
   const runningMax: Record<string, number> = { home: 0, away: 0 };
+  let hasBaseline = false;
   const additions = new Map<number, MatchEvent[]>();
 
   for (const frame of sorted) {
     if (!frame.scoreboard) continue;
+
+    if (!hasBaseline) {
+      runningMax.home = Math.max(0, frame.scoreboard.home);
+      runningMax.away = Math.max(0, frame.scoreboard.away);
+      hasBaseline = true;
+      continue;
+    }
+
     for (const team of ["home", "away"] as const) {
       const seen = frame.scoreboard![team];
       if (typeof seen === "number" && Number.isFinite(seen) && seen > runningMax[team]) {
+        const previous = runningMax[team];
         const ev: MatchEvent = {
           id: `f${frame.frameIndex}-scoreboard-goal-${team}-${seen}`,
           timestamp: frame.timestamp,
@@ -232,7 +242,8 @@ function synthesizeGoalsFromScoreboard(frames: FrameData[]): FrameData[] {
           description: `Scoreboard read ${frame.scoreboard!.home}-${frame.scoreboard!.away} — ${team === "home" ? "Home" : "Away"} goal confirmed from score overlay`,
           confidence: 0.92,
           isKeyMoment: true,
-          evidenceUsed: [`scoreboard read ${seen} for ${team}, up from ${runningMax[team]} previously observed`],
+          evidenceUsed: [`scoreboard read ${seen} for ${team}, up from ${previous} previously observed after the clip baseline`],
+          source: "scoreboard",
         };
         additions.set(frame.frameIndex, [...(additions.get(frame.frameIndex) ?? []), ev]);
         runningMax[team] = seen;

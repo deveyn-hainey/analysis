@@ -238,16 +238,26 @@ function tooCloseToExisting(event: MatchEvent, events: MatchEvent[], windowSecon
 function synthesizeGoalsFromScoreboard(frames: FrameData[]): FrameData[] {
   const sorted = [...frames].sort((a, b) => a.timestamp - b.timestamp);
   const runningMax: Record<TeamId, number> = { home: 0, away: 0 };
+  let hasBaseline = false;
   const additions = new Map<number, MatchEvent[]>();
 
   for (const frame of sorted) {
     if (!frame.scoreboard) continue;
+
+    if (!hasBaseline) {
+      runningMax.home = Math.max(0, frame.scoreboard.home);
+      runningMax.away = Math.max(0, frame.scoreboard.away);
+      hasBaseline = true;
+      continue;
+    }
+
     for (const team of ["home", "away"] as TeamId[]) {
       const seen = frame.scoreboard[team];
       // Use the running max (not just the previous frame) as the baseline so a
       // single misread frame that shows a lower score after the real goal doesn't
       // get treated as a second event, and a goal already counted doesn't repeat.
       if (typeof seen === "number" && Number.isFinite(seen) && seen > runningMax[team]) {
+        const previous = runningMax[team];
         const event: MatchEvent = {
           id: `f${frame.frameIndex}-scoreboard-goal-${team}-${seen}`,
           timestamp: frame.timestamp,
@@ -256,7 +266,8 @@ function synthesizeGoalsFromScoreboard(frames: FrameData[]): FrameData[] {
           description: `Scoreboard read ${frame.scoreboard.homeLabel ?? "Home"} ${frame.scoreboard.home}-${frame.scoreboard.away} ${frame.scoreboard.awayLabel ?? "Away"} — ${team === "home" ? frame.scoreboard.homeLabel ?? "Home" : frame.scoreboard.awayLabel ?? "Away"} goal confirmed from score overlay`,
           confidence: 0.92,
           isKeyMoment: true,
-          evidenceUsed: [`scoreboard read ${seen} for ${team}, up from ${runningMax[team]} previously observed in this clip`],
+          evidenceUsed: [`scoreboard read ${seen} for ${team}, up from ${previous} previously observed after the clip baseline`],
+          source: "scoreboard",
         };
         additions.set(frame.frameIndex, [...(additions.get(frame.frameIndex) ?? []), event]);
         runningMax[team] = seen;

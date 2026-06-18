@@ -55,6 +55,46 @@ function countEventType(events: MatchEvent[], type: string, team?: TeamId) {
   return events.filter((e) => e.type === type && (!team || e.team === team) && isVerifiedEvent(e)).length;
 }
 
+function scoreFromScoreboard(frames: FrameData[]): { home: number; away: number } | null {
+  const readings = frames
+    .filter((frame) =>
+      frame.scoreboard &&
+      Number.isFinite(frame.scoreboard.home) &&
+      Number.isFinite(frame.scoreboard.away) &&
+      frame.scoreboard.home >= 0 &&
+      frame.scoreboard.away >= 0 &&
+      frame.scoreboard.home <= 20 &&
+      frame.scoreboard.away <= 20
+    )
+    .map((frame) => ({
+      home: frame.scoreboard!.home,
+      away: frame.scoreboard!.away,
+      timestamp: frame.timestamp,
+    }))
+    .sort((a, b) => a.timestamp - b.timestamp);
+
+  if (!readings.length) return null;
+
+  const lastTimestamp = readings[readings.length - 1].timestamp;
+  const recent = readings.filter((reading) => reading.timestamp >= lastTimestamp - 12);
+  const candidates = recent.length ? recent : readings;
+  const tallies = new Map<string, { home: number; away: number; count: number; latest: number }>();
+
+  for (const reading of candidates) {
+    const key = `${reading.home}-${reading.away}`;
+    const existing = tallies.get(key);
+    tallies.set(key, {
+      home: reading.home,
+      away: reading.away,
+      count: (existing?.count ?? 0) + 1,
+      latest: Math.max(existing?.latest ?? 0, reading.timestamp),
+    });
+  }
+
+  const [best] = [...tallies.values()].sort((a, b) => b.count - a.count || b.latest - a.latest);
+  return best ? { home: best.home, away: best.away } : null;
+}
+
 function duplicateWindowSeconds(type: MatchEvent["type"]) {
   if (type === "goal") return 12;
   if (["shot", "save", "corner", "goal-kick", "freekick", "foul", "offside", "card_yellow", "card_red", "card_unknown"].includes(type)) {
@@ -140,7 +180,8 @@ function scoreboardTeamName(teamId: TeamId, frames: FrameData[]) {
 function buildTeamAnalysis(
   id: TeamId,
   frames: FrameData[],
-  allEvents: MatchEvent[]
+  allEvents: MatchEvent[],
+  scoreboardScore?: { home: number; away: number } | null
 ): TeamAnalysis {
   const teamEvents = allEvents.filter((e) => e.team === id);
 
@@ -194,7 +235,7 @@ function buildTeamAnalysis(
       tackles: countEventType(teamEvents, "tackle"),
       fouls: countEventType(teamEvents, "foul"),
       corners: countEventType(teamEvents, "corner"),
-      goals: countEventType(teamEvents, "goal"),
+      goals: scoreboardScore ? scoreboardScore[id] : countEventType(teamEvents, "goal"),
       distanceCovered: calcDistanceCovered(id, frames),
       expectedGoals,
       metricConfidence: {
@@ -391,9 +432,10 @@ export async function POST(req: NextRequest) {
         : { ...event, source };
     });
     const eventConflicts = buildEventConflicts(allEvents);
+    const scoreboardScore = scoreFromScoreboard(frames);
 
-    const homeTeam = buildTeamAnalysis("home", frames, allEvents);
-    const awayTeam = buildTeamAnalysis("away", frames, allEvents);
+    const homeTeam = buildTeamAnalysis("home", frames, allEvents, scoreboardScore);
+    const awayTeam = buildTeamAnalysis("away", frames, allEvents, scoreboardScore);
 
     const client = new Anthropic({ apiKey });
     const insights = await generateInsights(client, homeTeam, awayTeam, eventConflicts);
@@ -411,12 +453,13 @@ export async function POST(req: NextRequest) {
       analysisWarnings: [
         "Replay and broadcast angle changes are flagged when detected, but may still require coach review.",
         "Possession is sampled from frame-level visual evidence, not counted as timeline events.",
+        ...(scoreboardScore ? ["Final score is taken from scoreboard reads; goal timeline only includes score changes observed after the clip baseline."] : []),
         ...(eventReviewWarnings ?? []),
       ],
       insights,
       score: {
-        home: countEventType(allEvents, "goal", "home"),
-        away: countEventType(allEvents, "goal", "away"),
+        home: scoreboardScore?.home ?? countEventType(allEvents, "goal", "home"),
+        away: scoreboardScore?.away ?? countEventType(allEvents, "goal", "away"),
       },
       processingMethod: "ai",
     };

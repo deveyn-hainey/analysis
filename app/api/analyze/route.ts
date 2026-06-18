@@ -175,13 +175,54 @@ function countEventType(events: MatchEvent[], type: string, team?: "home" | "awa
   return events.filter((e) => e.type === type && (!team || e.team === team)).length;
 }
 
+function scoreFromScoreboard(frames: FrameData[]): { home: number; away: number } | null {
+  const readings = frames
+    .filter((frame) =>
+      frame.scoreboard &&
+      Number.isFinite(frame.scoreboard.home) &&
+      Number.isFinite(frame.scoreboard.away) &&
+      frame.scoreboard.home >= 0 &&
+      frame.scoreboard.away >= 0 &&
+      frame.scoreboard.home <= 20 &&
+      frame.scoreboard.away <= 20
+    )
+    .map((frame) => ({
+      home: frame.scoreboard!.home,
+      away: frame.scoreboard!.away,
+      timestamp: frame.timestamp,
+    }))
+    .sort((a, b) => a.timestamp - b.timestamp);
+
+  if (!readings.length) return null;
+
+  const lastTimestamp = readings[readings.length - 1].timestamp;
+  const recent = readings.filter((reading) => reading.timestamp >= lastTimestamp - 12);
+  const candidates = recent.length ? recent : readings;
+  const tallies = new Map<string, { home: number; away: number; count: number; latest: number }>();
+
+  for (const reading of candidates) {
+    const key = `${reading.home}-${reading.away}`;
+    const existing = tallies.get(key);
+    tallies.set(key, {
+      home: reading.home,
+      away: reading.away,
+      count: (existing?.count ?? 0) + 1,
+      latest: Math.max(existing?.latest ?? 0, reading.timestamp),
+    });
+  }
+
+  const [best] = [...tallies.values()].sort((a, b) => b.count - a.count || b.latest - a.latest);
+  return best ? { home: best.home, away: best.away } : null;
+}
+
 function buildTeamAnalysis(
   id: "home" | "away",
   name: string,
   color: string,
   formation: TeamAnalysis["formation"],
   frames: FrameData[],
-  allEvents: MatchEvent[]
+  allEvents: MatchEvent[],
+  scoreboardScore?: { home: number; away: number } | null
 ): TeamAnalysis {
   const teamEvents = allEvents.filter((e) => e.team === id);
   const passCount = countEventType(teamEvents, "pass");
@@ -212,7 +253,7 @@ function buildTeamAnalysis(
       tackles: countEventType(teamEvents, "tackle"),
       fouls: countEventType(teamEvents, "foul"),
       corners: countEventType(teamEvents, "corner"),
-      goals: countEventType(teamEvents, "goal"),
+      goals: scoreboardScore ? scoreboardScore[id] : countEventType(teamEvents, "goal"),
       distanceCovered: 0,
     },
     heatmap: buildHeatmap(id, frames),
@@ -385,9 +426,10 @@ export async function POST(req: NextRequest) {
     }
 
     const allEvents = analyzedFrames.flatMap((f) => f.events);
+    const scoreboardScore = scoreFromScoreboard(analyzedFrames);
 
-    const homeTeam = buildTeamAnalysis("home", "Home Team", "#3b82f6", "4-3-3", analyzedFrames, allEvents);
-    const awayTeam = buildTeamAnalysis("away", "Away Team", "#ef4444", "4-5-1", analyzedFrames, allEvents);
+    const homeTeam = buildTeamAnalysis("home", "Home Team", "#3b82f6", "4-3-3", analyzedFrames, allEvents, scoreboardScore);
+    const awayTeam = buildTeamAnalysis("away", "Away Team", "#ef4444", "4-5-1", analyzedFrames, allEvents, scoreboardScore);
 
     const insights = await generateInsights(client, homeTeam, awayTeam);
 
@@ -402,8 +444,8 @@ export async function POST(req: NextRequest) {
       keyEvents: allEvents.filter((e) => e.isKeyMoment),
       insights,
       score: {
-        home: countEventType(allEvents, "goal", "home"),
-        away: countEventType(allEvents, "goal", "away"),
+        home: scoreboardScore?.home ?? countEventType(allEvents, "goal", "home"),
+        away: scoreboardScore?.away ?? countEventType(allEvents, "goal", "away"),
       },
       processingMethod: "ai",
     };
