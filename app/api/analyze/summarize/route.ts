@@ -79,6 +79,39 @@ function scoreFromScoreboard(frames: FrameData[]): { home: number; away: number 
   return hasReading ? { home, away } : null;
 }
 
+// Goals scored *within this clip* = scoreboard delta from the first valid reading
+// to the last. Robust to camera cuts (the scoreboard is a stable overlay, not
+// affected by close-ups or which side players are on) and excludes goals already
+// on the board before the upload started. Falls back to counted goal events when
+// no scoreboard is legible.
+function clipScopedGoals(
+  frames: FrameData[],
+  goalEvents: { home: number; away: number }
+): { home: number; away: number } {
+  const valid = [...frames]
+    .sort((a, b) => a.timestamp - b.timestamp)
+    .map((f) => f.scoreboard)
+    .filter(
+      (b): b is NonNullable<FrameData["scoreboard"]> =>
+        !!b &&
+        Number.isFinite(b.home) &&
+        Number.isFinite(b.away) &&
+        b.home >= 0 &&
+        b.away >= 0 &&
+        b.home <= 20 &&
+        b.away <= 20
+    );
+
+  if (valid.length === 0) return goalEvents;
+
+  const first = valid[0];
+  const last = valid[valid.length - 1];
+  return {
+    home: Math.max(0, Math.min(20, last.home - first.home)),
+    away: Math.max(0, Math.min(20, last.away - first.away)),
+  };
+}
+
 function duplicateWindowSeconds(type: MatchEvent["type"]) {
   if (type === "goal") return 12;
   if (["shot", "save", "corner", "goal-kick", "freekick", "foul", "offside", "card_yellow", "card_red", "card_unknown"].includes(type)) {
@@ -506,6 +539,10 @@ export async function POST(req: NextRequest) {
         home: scoreboardScore?.home ?? countEventType(keyEvents, "goal", "home"),
         away: scoreboardScore?.away ?? countEventType(keyEvents, "goal", "away"),
       },
+      clipGoals: clipScopedGoals(frames, {
+        home: countEventType(keyEvents, "goal", "home"),
+        away: countEventType(keyEvents, "goal", "away"),
+      }),
       processingMethod: "ai",
     };
 

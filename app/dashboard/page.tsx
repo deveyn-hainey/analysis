@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useRef, Suspense } from "react";
+import { useEffect, useState, useRef, useMemo, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
   Activity,
@@ -22,7 +22,7 @@ import Heatmap from "@/components/Heatmap";
 import { videoStore } from "@/lib/videoStore";
 import { frameImageStore } from "@/lib/frameImageStore";
 import { denseFrameStore } from "@/lib/denseFrameStore";
-import { buildPassNetwork, estimateShotXg, teamExpectedGoals } from "@/lib/visionMetrics";
+import { buildPassNetwork, countPossessionPasses, estimateShotXg, teamExpectedGoals } from "@/lib/visionMetrics";
 
 const PANEL = "rounded-lg border border-[#1c3020] bg-[#0b130d] shadow-[0_0_40px_rgba(74,222,128,0.03)]";
 const EYEBROW = "text-[11px] uppercase tracking-[0.28em] text-[#5f7567] font-mono";
@@ -487,6 +487,8 @@ function SummaryPanel({ analysis }: { analysis: MatchAnalysis }) {
 function VisionMetricStrip({ analysis }: { analysis: MatchAnalysis }) {
   const home = analysis.homeTeam.stats;
   const away = analysis.awayTeam.stats;
+  const homeName = analysis.homeTeam.name;
+  const awayName = analysis.awayTeam.name;
   const metrics = [
     { label: "expected goals", value: estimateXg(home).toFixed(2), suffix: "xG", sub: `conf ${Math.round((home.metricConfidence?.xg ?? 0.45) * 100)}% · vs ${estimateXg(away).toFixed(2)}`, fill: pct(estimateXg(home), estimateXg(home) + estimateXg(away)) },
     { label: "possession", value: home.possession.toString(), suffix: "%", sub: `conf ${Math.round((home.metricConfidence?.possession ?? 0.5) * 100)}% · vs ${away.possession}%`, fill: home.possession },
@@ -497,7 +499,13 @@ function VisionMetricStrip({ analysis }: { analysis: MatchAnalysis }) {
   ];
 
   return (
-    <div className="grid md:grid-cols-3 xl:grid-cols-6 gap-4">
+    <div>
+      <div className="mb-4 flex items-center gap-2 text-xs font-mono">
+        <span className="inline-block h-2 w-2 rounded-full bg-green-400" />
+        <span className="uppercase tracking-[0.18em] text-green-300">{homeName}</span>
+        <span className="text-[#617169]">headline figures — each tile shows {homeName}, with “vs {awayName}” for comparison</span>
+      </div>
+      <div className="grid md:grid-cols-3 xl:grid-cols-6 gap-4">
       {metrics.map((metric) => (
         <div key={metric.label} className={`${PANEL} p-5`}>
           <div className={EYEBROW}>{metric.label}</div>
@@ -511,6 +519,7 @@ function VisionMetricStrip({ analysis }: { analysis: MatchAnalysis }) {
           <div className="mt-3 text-xs font-mono text-[#617169]">{metric.sub}</div>
         </div>
       ))}
+      </div>
     </div>
   );
 }
@@ -602,17 +611,23 @@ function XgMomentumPanel({ analysis }: { analysis: MatchAnalysis }) {
 }
 
 function FinishingPanel({ analysis }: { analysis: MatchAnalysis }) {
+  // Use clip-scoped goals (scored within the upload) — not the full-match scoreboard —
+  // so goals stay consistent with the in-clip shots, xG, and conversion below.
+  const clipGoals = analysis.clipGoals ?? analysis.score;
   const rows = [
     ["Total shots", analysis.homeTeam.stats.shots, analysis.awayTeam.stats.shots],
     ["On target", analysis.homeTeam.stats.shotsOnTarget, analysis.awayTeam.stats.shotsOnTarget],
     ["Corners", analysis.homeTeam.stats.corners, analysis.awayTeam.stats.corners],
-    ["Conversion", Math.round((analysis.score.home / Math.max(analysis.homeTeam.stats.shots, 1)) * 100), Math.round((analysis.score.away / Math.max(analysis.awayTeam.stats.shots, 1)) * 100), "%"],
-    ["Goals / xG", analysis.score.home, analysis.score.away],
+    ["Conversion", Math.min(100, Math.round((clipGoals.home / Math.max(analysis.homeTeam.stats.shots, 1)) * 100)), Math.min(100, Math.round((clipGoals.away / Math.max(analysis.awayTeam.stats.shots, 1)) * 100)), "%"],
+    ["Goals / xG", clipGoals.home, clipGoals.away],
   ] as const;
 
   return (
     <div className={`${PANEL} p-6`}>
       <div className={EYEBROW}>finishing quality</div>
+      <div className="mt-2 text-sm text-[#829086]">
+        within this clip · full-match scoreboard: {analysis.homeTeam.name} {analysis.score.home}–{analysis.score.away} {analysis.awayTeam.name}
+      </div>
       <div className="mt-7 divide-y divide-[#1c3020]">
         {rows.map((row) => (
           <div key={row[0]} className="grid grid-cols-[80px_1fr_80px] items-center py-4 text-sm">
@@ -777,8 +792,8 @@ function PassNetworkPanel({ frames, currentFrame, homeTeamName, awayTeamName }: 
           })}
           {nodes.map((node, i) => (
             <g key={`${node.id}-${i}`}>
-              <circle cx={node.position.x * 7} cy={node.position.y * 4.54} r={14 + (node.touches / maxTouches) * 13} fill={nodeColor} fillOpacity={0.72} stroke={nodeStroke} strokeWidth={2} />
-              <text x={node.position.x * 7} y={node.position.y * 4.54 + 5} textAnchor="middle" fill="#061008" fontSize={13} fontWeight={900}>
+              <circle cx={node.position.x * 7} cy={node.position.y * 4.54} r={7 + (node.touches / maxTouches) * 7} fill={nodeColor} fillOpacity={0.72} stroke={nodeStroke} strokeWidth={1.5} />
+              <text x={node.position.x * 7} y={node.position.y * 4.54 + 3.5} textAnchor="middle" fill="#061008" fontSize={9} fontWeight={900}>
                 {node.number || i + 1}
               </text>
             </g>
@@ -788,7 +803,7 @@ function PassNetworkPanel({ frames, currentFrame, homeTeamName, awayTeamName }: 
               key={`live-${player.id}-${i}`}
               cx={player.position.x * 7}
               cy={player.position.y * 4.54}
-              r={5}
+              r={3.5}
               fill="#f0fdf4"
               fillOpacity={0.9}
               stroke="#061008"
@@ -939,6 +954,13 @@ function DashboardContent() {
     }
   }, [router, searchParams]);
 
+  // Count passes from the possession chain over the densest frames available,
+  // rather than the throttled `pass` event timeline (which undercounts badly).
+  const passStats = useMemo(
+    () => countPossessionPasses(denseFrames.length ? denseFrames : analysis?.frames ?? []),
+    [denseFrames, analysis]
+  );
+
   if (!analysis) {
     return (
       <div className="min-h-screen bg-[#070e07] flex items-center justify-center">
@@ -953,6 +975,25 @@ function DashboardContent() {
   const currentFrame = renderableFrame(selectedFrame ?? analysis.frames[0]);
   const displayFrame = renderableFrame(liveFrame ?? currentFrame);
   const fieldFrame = orientFrameForField(displayFrame, fieldOrientation);
+
+  // Override the throttled-event pass count / accuracy with the possession-chain
+  // tally so the displayed passes reflect every detected pass and accuracy tracks
+  // possession. Other stats are unchanged.
+  const withPossessionPasses = (team: MatchAnalysis["homeTeam"]) => {
+    const ps = passStats[team.id];
+    const total = ps.completed + ps.lost;
+    return {
+      ...team,
+      stats: {
+        ...team.stats,
+        passes: ps.completed,
+        passAccuracy: total > 0 ? Math.round((ps.completed / total) * 100) : team.stats.passAccuracy,
+      },
+    };
+  };
+  const displayHome = withPossessionPasses(analysis.homeTeam);
+  const displayAway = withPossessionPasses(analysis.awayTeam);
+  const displayAnalysis = { ...analysis, homeTeam: displayHome, awayTeam: displayAway };
   const passNetworkFrames = (denseFrames.length ? denseFrames : analysis.frames).map((frame) =>
     orientFrameForField(frame, fieldOrientation)
   );
@@ -1274,7 +1315,7 @@ function DashboardContent() {
         {viewMode === "coach" && (
           <>
             <SummaryPanel analysis={analysis} />
-            <VisionMetricStrip analysis={analysis} />
+            <VisionMetricStrip analysis={displayAnalysis} />
 
             <div className="grid lg:grid-cols-12 gap-4">
               <div className="lg:col-span-8">{trackingPanel}</div>
@@ -1318,7 +1359,7 @@ function DashboardContent() {
                 <div className={EYEBROW}>head to head</div>
                 <h2 className="mt-3 text-xl font-black text-[#f0fdf4]">Team Comparison</h2>
                 <div className="mt-5">
-                  <TeamComparison homeTeam={analysis.homeTeam} awayTeam={analysis.awayTeam} />
+                  <TeamComparison homeTeam={displayHome} awayTeam={displayAway} />
                 </div>
               </div>
             </div>

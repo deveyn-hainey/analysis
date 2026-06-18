@@ -1,10 +1,14 @@
 "use client";
 
 import { useState } from "react";
-import type { FrameData, Player } from "@/lib/types";
+import type { FrameData, PitchView, Player, Position } from "@/lib/types";
 
 interface SoccerFieldProps {
   frame: FrameData;
+  // When provided, image-space positions are projected onto true pitch coordinates
+  // so a half-field camera shot lands in the correct half of the board instead of
+  // being normalized to the middle. Omit to render raw image positions.
+  pitchView?: PitchView;
 }
 
 const W = 700;
@@ -12,6 +16,20 @@ const H = 454;
 
 const px = (x: number) => (x / 100) * W;
 const py = (y: number) => (y / 100) * H;
+
+const clamp01 = (n: number) => Math.min(100, Math.max(0, n));
+
+// Map a broadcast image position (0–100 of the frame) to pitch coordinates using
+// the estimated visible window. Linear approximation: horizontal spans the visible
+// pitch-length range; vertical maps the on-field band (below the far touchline) to
+// the full pitch width. Perspective curvature is not modelled.
+function toPitchCoords(pos: Position, view?: PitchView): Position {
+  if (!view) return pos;
+  const x = view.lengthMin + (pos.x / 100) * (view.lengthMax - view.lengthMin);
+  const denom = Math.max(1, 100 - view.topImageY);
+  const y = ((pos.y - view.topImageY) / denom) * 100;
+  return { x: clamp01(x), y: clamp01(y) };
+}
 
 const ROLE_LABELS: Record<Player["role"], string> = {
   gk: "GK",
@@ -26,9 +44,10 @@ const ACTION_COLORS: Partial<Record<Player["action"], string>> = {
   passing: "#06b6d4",
 };
 
-export default function SoccerField({ frame }: SoccerFieldProps) {
+export default function SoccerField({ frame, pitchView }: SoccerFieldProps) {
   const [hovered, setHovered] = useState<string | null>(null);
   const hoveredPlayer = frame.players.find((p) => p.id === hovered);
+  const ball = frame.ballPosition ? toPitchCoords(frame.ballPosition, pitchView) : null;
 
   return (
     <div className="relative w-full">
@@ -71,30 +90,34 @@ export default function SoccerField({ frame }: SoccerFieldProps) {
         <path d={`M ${W - 8},${H - 8} A 16,16 0 0,1 ${W - 24},${H - 8}`} fill="none" stroke="white" strokeWidth={1.5} opacity={0.5} />
 
         {/* Referees */}
-        {frame.referees?.map((pos, i) => (
+        {frame.referees?.map((rawPos, i) => {
+          const pos = toPitchCoords(rawPos, pitchView);
+          return (
           <circle
             key={`ref-${i}`}
             cx={px(pos.x)}
             cy={py(pos.y)}
-            r={9}
+            r={6}
             fill="#1a1a1a"
             stroke="#fbbf24"
-            strokeWidth={2}
+            strokeWidth={1.5}
           />
-        ))}
+          );
+        })}
 
         {/* Ball */}
-        {frame.ballPosition && (
+        {ball && (
           <g>
-            <circle cx={px(frame.ballPosition.x)} cy={py(frame.ballPosition.y)} r={8} fill="white" stroke="#d97706" strokeWidth={2} />
-            <circle cx={px(frame.ballPosition.x)} cy={py(frame.ballPosition.y)} r={3} fill="#d97706" />
+            <circle cx={px(ball.x)} cy={py(ball.y)} r={5.5} fill="white" stroke="#d97706" strokeWidth={1.75} />
+            <circle cx={px(ball.x)} cy={py(ball.y)} r={2.25} fill="#d97706" />
           </g>
         )}
 
         {/* Players */}
         {frame.players.map((player) => {
-          const x = px(player.position.x);
-          const y = py(player.position.y);
+          const mapped = toPitchCoords(player.position, pitchView);
+          const x = px(mapped.x);
+          const y = py(mapped.y);
           const color = player.team === "home" ? "#ef4444" : "#3b82f6";
           const accent = ACTION_COLORS[player.action];
           const isHovered = hovered === player.id;
@@ -106,9 +129,9 @@ export default function SoccerField({ frame }: SoccerFieldProps) {
               onMouseLeave={() => setHovered(null)}
               style={{ cursor: "pointer" }}
             >
-              {isHovered && <circle cx={x} cy={y} r={18} fill={color} opacity={0.15} />}
-              {accent && <circle cx={x} cy={y} r={14} fill="none" stroke={accent} strokeWidth={2} opacity={0.8} />}
-              <circle cx={x} cy={y} r={11} fill={color} stroke="white" strokeWidth={1.5} />
+              {isHovered && <circle cx={x} cy={y} r={12} fill={color} opacity={0.15} />}
+              {accent && <circle cx={x} cy={y} r={9} fill="none" stroke={accent} strokeWidth={1.5} opacity={0.8} />}
+              <circle cx={x} cy={y} r={6.5} fill={color} stroke="white" strokeWidth={1.25} />
             </g>
           );
         })}

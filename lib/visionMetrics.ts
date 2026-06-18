@@ -41,8 +41,11 @@ export function shotLikeEvents(events: MatchEvent[], team?: TeamId) {
 }
 
 export function teamExpectedGoals(events: MatchEvent[], team: TeamId) {
+  // Prefer the per-shot xG already on the event (vision-estimated when available)
+  // so the team total matches the shot map, finishing panel, and cumulative curve.
+  // Fall back to the positional estimate only when an event has no xG yet.
   return +shotLikeEvents(events, team)
-    .reduce((sum, event) => sum + estimateShotXg(event), 0)
+    .reduce((sum, event) => sum + (event.xg ?? estimateShotXg(event)), 0)
     .toFixed(2);
 }
 
@@ -60,6 +63,58 @@ export function stableTrackingCoverage(frames: FrameData[], team?: TeamId) {
   const players = frames.flatMap((frame) => frame.players.filter((player) => !team || player.team === team));
   if (!players.length) return 0;
   return players.filter((player) => isStablePlayerId(player.id) && player.number > 0).length / players.length;
+}
+
+// Count passes from the per-frame possession chain instead of the throttled
+// `pass` event timeline (which de-duplicates to ~1 per 4-5s and badly undercounts).
+// A completed pass = the ball moving to a different teammate; a loss = possession
+// handed to the other team. Pass accuracy = completed / (completed + lost), which
+// naturally tracks possession dominance. Best run over dense (5fps) frames.
+export function countPossessionPasses(
+  frames: FrameData[]
+): Record<TeamId, { completed: number; lost: number }> {
+  const result: Record<TeamId, { completed: number; lost: number }> = {
+    home: { completed: 0, lost: 0 },
+    away: { completed: 0, lost: 0 },
+  };
+  const sorted = [...frames].sort((a, b) => a.timestamp - b.timestamp);
+  // Require a new holder to persist this many frames before counting a change —
+  // cuts per-frame ID/assignment flicker. Relaxed for sparse review frames.
+  const minHold = sorted.length >= 60 ? 2 : 1;
+  const keyOf = (p: { team: TeamId; playerId: string }) => `${p.team}:${p.playerId}`;
+
+  let confirmed: { team: TeamId; playerId: string } | null = null;
+  let pending: { team: TeamId; playerId: string } | null = null;
+  let pendingCount = 0;
+
+  for (const frame of sorted) {
+    const p = frame.possessingPlayer;
+    if (!p || frame.possession === "contested") continue; // hold last state through contested blips
+    const holder = { team: p.team, playerId: p.playerId };
+    if (confirmed && keyOf(holder) === keyOf(confirmed)) {
+      pending = null;
+      pendingCount = 0;
+      continue;
+    }
+    if (pending && keyOf(holder) === keyOf(pending)) pendingCount += 1;
+    else {
+      pending = holder;
+      pendingCount = 1;
+    }
+    if (pendingCount >= minHold) {
+      if (confirmed) {
+        if (confirmed.team === holder.team && confirmed.playerId !== holder.playerId) {
+          result[holder.team].completed += 1;
+        } else if (confirmed.team !== holder.team) {
+          result[confirmed.team].lost += 1;
+        }
+      }
+      confirmed = holder;
+      pending = null;
+      pendingCount = 0;
+    }
+  }
+  return result;
 }
 
 export function buildPassNetwork(frames: FrameData[], team: TeamId) {

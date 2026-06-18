@@ -358,6 +358,7 @@ export const SAMPLE_ANALYSIS: MatchAnalysis = {
   videoDuration: 178,
   framesAnalyzed: frames.length,
   score: { home: 1, away: 0 },
+  clipGoals: { home: 1, away: 0 },
   processingMethod: "demo",
   homeTeam: {
     id: "home",

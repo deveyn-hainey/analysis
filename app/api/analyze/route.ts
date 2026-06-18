@@ -470,6 +470,10 @@ export async function POST(req: NextRequest) {
         home: scoreboardScore?.home ?? countEventType(allEvents, "goal", "home"),
         away: scoreboardScore?.away ?? countEventType(allEvents, "goal", "away"),
       },
+      clipGoals: {
+        home: countEventType(allEvents, "goal", "home"),
+        away: countEventType(allEvents, "goal", "away"),
+      },
       processingMethod: "ai",
     };
 

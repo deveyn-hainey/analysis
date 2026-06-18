@@ -76,9 +76,24 @@ export interface OutcomeProjection {
   source: "vision" | "fallback";
 }
 
+// Estimated mapping from this frame's broadcast image to true pitch coordinates,
+// used only by the tactical board so a half-field camera shot lands in the right
+// half of the pitch instead of being normalized to the middle. The ring/overlay
+// tracking ignores this and keeps using raw image-space `position`.
+//   lengthMin/lengthMax: pitch length % (0 = left goal line, 100 = right) visible
+//     at the image's left / right edges.
+//   topImageY: image y % (0 = top, 100 = bottom) where the playing field begins
+//     (far touchline / horizon), excluding crowd and stands above it.
+export interface PitchView {
+  lengthMin: number;
+  lengthMax: number;
+  topImageY: number;
+}
+
 export interface FrameData {
   frameIndex: number;
   timestamp: number;
+  pitchView?: PitchView;
   players: Player[];
   ballPosition?: Position;
   events: MatchEvent[];
@@ -154,7 +169,12 @@ export interface MatchAnalysis {
   analysisWarnings?: string[];
   insights: CoachingInsight[];
   outcome?: OutcomeProjection;
+  // `score` is the full-match scoreboard reading at the end of the clip (may carry
+  // goals scored before the upload). `clipGoals` is only the goals scored within
+  // the uploaded clip (scoreboard delta) — use this for finishing/conversion so
+  // they stay consistent with in-clip shots and xG.
   score: { home: number; away: number };
+  clipGoals: { home: number; away: number };
   processingMethod: "ai" | "demo";
 }
 
