@@ -34,7 +34,7 @@ export default function CoachingInsights({ insights, homeTeamName, awayTeamName 
   }
 
   return (
-    <div className="grid lg:grid-cols-2 gap-4">
+    <div className="flex flex-col gap-4">
       {insights.map((insight) => {
         const cat = CATEGORY_CONFIG[insight.category] ?? CATEGORY_CONFIG.tactical;
         const pri = PRIORITY_CONFIG[insight.priority] ?? PRIORITY_CONFIG.medium;

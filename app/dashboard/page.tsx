@@ -215,7 +215,6 @@ function easeDisplayedFrame(previous: FrameData | null, target: FrameData): Fram
   return { ...target, players: smoothedPlayers, ballPosition };
 }
 
-type ViewMode = "coach" | "player";
 type FieldOrientation = "broadcast" | "mirrored";
 
 function orientPosition(position: Position, orientation: FieldOrientation): Position {
@@ -661,52 +660,6 @@ function PitchLines() {
   );
 }
 
-function ShotMapPanel({ analysis }: { analysis: MatchAnalysis }) {
-  const shots = analysis.keyEvents.filter((event) => ["shot", "goal", "save"].includes(event.type));
-  const points = shots.filter((event) => event.position);
-
-  return (
-    <div className={`${PANEL} p-6`}>
-      <div className={EYEBROW}>shot map</div>
-      <h2 className="mt-3 text-xl font-black text-[#f0fdf4]">Location & Quality - {points.length} located shots</h2>
-      <div className="relative mx-auto mt-8 aspect-[700/454] max-w-4xl rounded-lg bg-[#09110c]">
-        <PitchLines />
-        <svg viewBox="0 0 700 454" className="absolute inset-0 h-full w-full">
-          {points.map((event, i) => {
-            const x = (event.position?.x ?? 50) * 7;
-            const y = (event.position?.y ?? 50) * 4.54;
-            const isGoal = event.type === "goal";
-            const isHome = event.team === "home";
-            const r = isGoal ? 15 : 7 + Math.round((event.xg ?? estimateShotXg(event)) * 18);
-            return (
-              <circle
-                key={event.id}
-                cx={x}
-                cy={y}
-                r={r}
-                fill={isGoal ? "#fde047" : isHome ? "#63e681" : "#94a3a0"}
-                fillOpacity={isGoal ? 0.95 : isHome ? 0.85 : 0.75}
-                stroke={isGoal ? "#fde047" : isHome ? "#63e681" : "#94a3a0"}
-                strokeWidth={isGoal ? 7 : 2}
-                strokeOpacity={isGoal ? 0.2 : 0.9}
-              />
-            );
-          })}
-        </svg>
-      </div>
-      <div className="mt-5 flex gap-5 text-xs font-mono text-[#829086]">
-        <span className="text-yellow-300">● goal</span>
-        <span className="text-green-300">● on target</span>
-        <span>○ off target</span>
-        <span>size = xG estimate</span>
-      </div>
-      {points.length === 0 && (
-        <p className="mt-4 text-xs font-mono text-amber-300">No verified shot locations available for this clip.</p>
-      )}
-    </div>
-  );
-}
-
 function PassNetworkPanel({ frames, currentFrame, homeTeamName, awayTeamName }: { frames: FrameData[]; currentFrame: FrameData; homeTeamName: string; awayTeamName: string }) {
   const [selectedTeam, setSelectedTeam] = useState<"home" | "away">("home");
   const teamName = selectedTeam === "home" ? homeTeamName : awayTeamName;
@@ -855,7 +808,6 @@ function DashboardContent() {
   // Smoothly interpolated frame — updated at ~30fps via RAF for fluid overlay motion
   const [liveFrame, setLiveFrame] = useState<FrameData | null>(null);
   const [activeHeatmapTeam, setActiveHeatmapTeam] = useState<"home" | "away">("home");
-  const [viewMode, setViewMode] = useState<ViewMode>("coach");
   const [pitchView, setPitchView] = useState<"frame" | "tactical">("tactical");
   const [fieldOrientation, setFieldOrientation] = useState<FieldOrientation>("broadcast");
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
@@ -1182,7 +1134,9 @@ function DashboardContent() {
           </button>
         </div>
       </div>
-      <Heatmap team={activeHeatmapTeam === "home" ? analysis.homeTeam : analysis.awayTeam} />
+      <div className="mx-auto max-w-2xl">
+        <Heatmap team={activeHeatmapTeam === "home" ? analysis.homeTeam : analysis.awayTeam} />
+      </div>
     </div>
   );
 
@@ -1209,24 +1163,9 @@ function DashboardContent() {
           </div>
 
           <div className="flex items-center gap-3">
-            <div className="flex rounded-lg border border-[#1c3020] overflow-hidden text-xs">
-              <button
-                onClick={() => setViewMode("coach")}
-                className={`px-3 py-1.5 font-medium transition-colors ${
-                  viewMode === "coach" ? "bg-green-400 text-black" : "text-[#6b9e6b] hover:text-[#f0fdf4]"
-                }`}
-              >
-                Coach
-              </button>
-              <button
-                onClick={() => setViewMode("player")}
-                className={`px-3 py-1.5 font-medium transition-colors ${
-                  viewMode === "player" ? "bg-green-400 text-black" : "text-[#6b9e6b] hover:text-[#f0fdf4]"
-                }`}
-              >
-                Player
-              </button>
-            </div>
+            <span className="rounded-lg border border-[#1c3020] px-3 py-1.5 text-xs font-medium text-[#6b9e6b]">
+              Insights
+            </span>
 
             {analysis.processingMethod === "demo" && (
               <span className="text-xs bg-yellow-400/10 text-yellow-400 px-2 py-1 rounded-full border border-yellow-400/20">
@@ -1239,15 +1178,13 @@ function DashboardContent() {
               </span>
             )}
 
-            {viewMode === "coach" && (
-              <button
-                onClick={exportJson}
-                className="flex items-center gap-1.5 text-xs text-[#6b9e6b] hover:text-[#f0fdf4] border border-[#1c3020] hover:border-[#2d4a30] transition-colors px-3 py-1.5 rounded-lg"
-              >
-                <Download className="w-3.5 h-3.5" />
-                Export JSON
-              </button>
-            )}
+            <button
+              onClick={exportJson}
+              className="flex items-center gap-1.5 text-xs text-[#6b9e6b] hover:text-[#f0fdf4] border border-[#1c3020] hover:border-[#2d4a30] transition-colors px-3 py-1.5 rounded-lg"
+            >
+              <Download className="w-3.5 h-3.5" />
+              Export JSON
+            </button>
           </div>
         </div>
       </nav>
@@ -1268,52 +1205,7 @@ function DashboardContent() {
           </div>
         )}
 
-        {/* ── PLAYER MODE ── */}
-        {viewMode === "player" && (
-          <>
-            <SummaryPanel analysis={analysis} />
-            <div className="grid lg:grid-cols-12 gap-4">
-              <div className="lg:col-span-8">{trackingPanel}</div>
-              <div className="lg:col-span-4">
-                <div className={`${PANEL} p-5 max-h-[560px] overflow-hidden`}>
-                  <div className={EYEBROW}>match events</div>
-                  <h2 className="mt-2 text-xl font-black text-[#f0fdf4]">Auto-extracted from video</h2>
-                  <div className="mt-5 max-h-[460px] overflow-y-auto pr-1">
-                    <EventTimeline
-                      events={analysis.keyEvents}
-                      selectedEventId={selectedEventId}
-                      selectedTimestamp={selectedFrame?.timestamp}
-                      onSelect={seekToEvent}
-                      homeTeamName={analysis.homeTeam.name}
-                      awayTeamName={analysis.awayTeam.name}
-                    />
-                  </div>
-                </div>
-              </div>
-            </div>
-            <div className={`${PANEL} p-6`}>
-              <div className="flex items-center gap-2 mb-5">
-                <div className="w-8 h-8 rounded-lg bg-green-400/10 flex items-center justify-center">
-                  <Activity className="w-4 h-4 text-green-400" />
-                </div>
-                <div>
-                  <h2 className="text-sm font-semibold text-[#f0fdf4]">Coaching Insights</h2>
-                  <p className="text-xs text-[#6b9e6b]">Priority-ranked, plain-English recommendations</p>
-                </div>
-              </div>
-              <CoachingInsights
-                insights={analysis.insights}
-                homeTeamName={analysis.homeTeam.name}
-                awayTeamName={analysis.awayTeam.name}
-              />
-            </div>
-            <PipelinePanel denseStatus={denseStatus} denseFrames={denseFrames} />
-          </>
-        )}
-
-        {/* ── COACH MODE ── */}
-        {viewMode === "coach" && (
-          <>
+        <>
             <SummaryPanel analysis={analysis} />
             <VisionMetricStrip analysis={displayAnalysis} />
 
@@ -1342,19 +1234,7 @@ function DashboardContent() {
               <PassNetworkPanel frames={passNetworkFrames} currentFrame={fieldFrame} homeTeamName={analysis.homeTeam.name} awayTeamName={analysis.awayTeam.name} />
             </div>
 
-            <div className="grid lg:grid-cols-[1.35fr_0.65fr] gap-4">
-              <XgMomentumPanel analysis={analysis} />
-              <FinishingPanel analysis={analysis} />
-            </div>
-
             <div className="grid lg:grid-cols-2 gap-4">
-              <div className={`${PANEL} p-6`}>
-                <div className={EYEBROW}>action statistics</div>
-                <h2 className="mt-3 text-xl font-black text-[#f0fdf4]">Duels & Set Actions</h2>
-                <div className="mt-5">
-                  <StatsChart homeTeam={analysis.homeTeam} awayTeam={analysis.awayTeam} />
-                </div>
-              </div>
               <div className={`${PANEL} p-6`}>
                 <div className={EYEBROW}>head to head</div>
                 <h2 className="mt-3 text-xl font-black text-[#f0fdf4]">Team Comparison</h2>
@@ -1362,11 +1242,19 @@ function DashboardContent() {
                   <TeamComparison homeTeam={displayHome} awayTeam={displayAway} />
                 </div>
               </div>
+              <FinishingPanel analysis={analysis} />
             </div>
 
-            <div className="grid lg:grid-cols-2 gap-4">
+            <div className="grid lg:grid-cols-3 gap-4">
+              <XgMomentumPanel analysis={analysis} />
+              <div className={`${PANEL} p-6`}>
+                <div className={EYEBROW}>action statistics</div>
+                <h2 className="mt-3 text-xl font-black text-[#f0fdf4]">Duels & Set Actions</h2>
+                <div className="mt-5">
+                  <StatsChart homeTeam={analysis.homeTeam} awayTeam={analysis.awayTeam} />
+                </div>
+              </div>
               {spatialOccupancyPanel}
-              <ShotMapPanel analysis={analysis} />
             </div>
 
             <div className={`${PANEL} p-6`}>
@@ -1387,7 +1275,6 @@ function DashboardContent() {
             </div>
             <PipelinePanel denseStatus={denseStatus} denseFrames={denseFrames} />
           </>
-        )}
       </main>
 
       <footer className="border-t border-[#1c3020] py-5 text-center text-[#6b9e6b] text-xs mt-8">
