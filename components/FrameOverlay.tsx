@@ -10,8 +10,8 @@ interface Props {
 }
 
 const DOT_COLOR: Record<string, string> = {
-  home: "#4ade80",
-  away: "#ef4444",
+  home: "#ef4444",
+  away: "#3b82f6",
 };
 
 export default function FrameOverlay({ base64, players, ballPosition, referees }: Props) {

@@ -41,8 +41,6 @@ export interface Player {
   position: Position;
   action: PlayerAction;
   role: "gk" | "def" | "mid" | "fwd";
-  detectionConfidence?: number;
-  inferred?: boolean;
 }
 
 export interface MatchEvent {
@@ -81,11 +79,6 @@ export interface FrameData {
   // even when they land in different review batches or a batch's event
   // confirmation otherwise fails — see synthesizeGoalsFromScoreboard.
   scoreboard?: { home: number; away: number; homeLabel?: string; awayLabel?: string } | null;
-  // Worker-side tracking quality. Wide frames have enough stable players from both
-  // teams for tactical shape/network panels; closeups should still drive the video
-  // overlay but should not collapse the tactical state.
-  trackingQuality?: "wide" | "low_confidence" | "closeup";
-  trackingCounts?: { players: number; home: number; away: number; inferred: number };
 }
 
 export interface TeamStats {

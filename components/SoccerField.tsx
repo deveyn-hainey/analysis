@@ -95,7 +95,7 @@ export default function SoccerField({ frame }: SoccerFieldProps) {
         {frame.players.map((player) => {
           const x = px(player.position.x);
           const y = py(player.position.y);
-          const color = player.team === "home" ? "#3b82f6" : "#ef4444";
+          const color = player.team === "home" ? "#ef4444" : "#3b82f6";
           const accent = ACTION_COLORS[player.action];
           const isHovered = hovered === player.id;
 
@@ -120,7 +120,7 @@ export default function SoccerField({ frame }: SoccerFieldProps) {
           <div className="flex items-center gap-2 mb-1">
             <div
               className="w-3 h-3 rounded-full"
-              style={{ backgroundColor: hoveredPlayer.team === "home" ? "#3b82f6" : "#ef4444" }}
+              style={{ backgroundColor: hoveredPlayer.team === "home" ? "#ef4444" : "#3b82f6" }}
             />
             <span className="font-semibold text-[#f0fdf4]">
               #{hoveredPlayer.number} · {ROLE_LABELS[hoveredPlayer.role]}
@@ -136,11 +136,11 @@ export default function SoccerField({ frame }: SoccerFieldProps) {
       {/* Legend */}
       <div className="absolute bottom-4 right-4 flex items-center gap-4 bg-[#070e07]/80 border border-[#1c3020] rounded-lg px-3 py-2 text-xs">
         <div className="flex items-center gap-1.5">
-          <div className="w-3 h-3 rounded-full bg-blue-500" />
+          <div className="w-3 h-3 rounded-full bg-red-500" />
           <span className="text-[#6b9e6b]">Home</span>
         </div>
         <div className="flex items-center gap-1.5">
-          <div className="w-3 h-3 rounded-full bg-red-500" />
+          <div className="w-3 h-3 rounded-full bg-blue-500" />
           <span className="text-[#6b9e6b]">Away</span>
         </div>
         <div className="flex items-center gap-1.5">
