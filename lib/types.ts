@@ -114,6 +114,8 @@ export interface CoachingInsight {
   observation: string;
   recommendation: string;
   affectedTeam: TeamId | "both";
+  source?: "claude" | "fallback";
+  evidenceUsed?: string[];
 }
 
 export interface MatchAnalysis {

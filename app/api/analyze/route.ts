@@ -332,7 +332,44 @@ function buildFallbackInsights(
     });
   }
 
-  return insights.slice(0, 5);
+  return insights.slice(0, 5).map((insight) => enrichInsightEvidence(insight, homeTeam, awayTeam, "fallback"));
+}
+
+function insightTeamNames(insight: CoachingInsight, homeTeam: TeamAnalysis, awayTeam: TeamAnalysis) {
+  if (insight.affectedTeam === "home") return [homeTeam.name];
+  if (insight.affectedTeam === "away") return [awayTeam.name];
+  return [homeTeam.name, awayTeam.name];
+}
+
+function enrichInsightEvidence(
+  insight: CoachingInsight,
+  homeTeam: TeamAnalysis,
+  awayTeam: TeamAnalysis,
+  source: NonNullable<CoachingInsight["source"]>
+): CoachingInsight {
+  const teamNames = insightTeamNames(insight, homeTeam, awayTeam).join(" / ");
+  const evidence = new Set<string>(insight.evidenceUsed ?? []);
+
+  evidence.add(source === "claude" ? "Claude summary model interpreted CV/statistical metrics" : "deterministic fallback insight template");
+  evidence.add(`clip-scoped scoreboard: ${homeTeam.name} ${homeTeam.stats.goals}-${awayTeam.stats.goals} ${awayTeam.name}`);
+
+  if (insight.category === "possession") {
+    evidence.add(`sampled possession: ${homeTeam.name} ${homeTeam.stats.possession}%, ${awayTeam.name} ${awayTeam.stats.possession}%`);
+  } else if (insight.category === "attacking") {
+    evidence.add(`shot stats: ${homeTeam.name} ${homeTeam.stats.shots} shots, ${awayTeam.name} ${awayTeam.stats.shots} shots`);
+  } else if (insight.category === "defensive") {
+    evidence.add(`defensive events: ${homeTeam.name} ${homeTeam.stats.tackles} tackles, ${awayTeam.name} ${awayTeam.stats.tackles} tackles`);
+  } else if (insight.category === "tactical") {
+    evidence.add(`camera-space average positions: ${homeTeam.name} x=${homeTeam.averagePosition.x}, ${awayTeam.name} x=${awayTeam.averagePosition.x}`);
+  }
+
+  evidence.add(`affected team scope: ${teamNames}`);
+
+  return {
+    ...insight,
+    source,
+    evidenceUsed: [...evidence].slice(0, 5),
+  };
 }
 
 async function generateInsights(
@@ -382,7 +419,9 @@ affectedTeam options: home, away, both`;
     // Strip markdown code fences if Claude wrapped the JSON
     const cleaned = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
     const parsed = JSON.parse(cleaned) as CoachingInsight[];
-    return Array.isArray(parsed) && parsed.length > 0 ? parsed : buildFallbackInsights(homeTeam, awayTeam);
+    return Array.isArray(parsed) && parsed.length > 0
+      ? parsed.map((insight) => enrichInsightEvidence(insight, homeTeam, awayTeam, "claude"))
+      : buildFallbackInsights(homeTeam, awayTeam);
   } catch {
     return buildFallbackInsights(homeTeam, awayTeam);
   }

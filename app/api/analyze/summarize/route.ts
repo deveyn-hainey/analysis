@@ -331,7 +331,48 @@ function buildFallbackInsights(
     });
   }
 
-  return insights.slice(0, 5);
+  return insights.slice(0, 5).map((insight) => enrichInsightEvidence(insight, homeTeam, awayTeam, "fallback"));
+}
+
+function insightTeamNames(insight: CoachingInsight, homeTeam: TeamAnalysis, awayTeam: TeamAnalysis) {
+  if (insight.affectedTeam === "home") return [homeTeam.name];
+  if (insight.affectedTeam === "away") return [awayTeam.name];
+  return [homeTeam.name, awayTeam.name];
+}
+
+function enrichInsightEvidence(
+  insight: CoachingInsight,
+  homeTeam: TeamAnalysis,
+  awayTeam: TeamAnalysis,
+  source: NonNullable<CoachingInsight["source"]>
+): CoachingInsight {
+  const teamNames = insightTeamNames(insight, homeTeam, awayTeam).join(" / ");
+  const evidence = new Set<string>(insight.evidenceUsed ?? []);
+
+  evidence.add(source === "claude" ? "Claude summary model interpreted CV/statistical metrics" : "deterministic fallback insight template");
+  evidence.add(`clip-scoped scoreboard: ${homeTeam.name} ${homeTeam.stats.goals}-${awayTeam.stats.goals} ${awayTeam.name}`);
+
+  if (insight.category === "possession") {
+    evidence.add(`sampled possession: ${homeTeam.name} ${homeTeam.stats.possession}%, ${awayTeam.name} ${awayTeam.stats.possession}%`);
+    evidence.add(`pass estimates: ${homeTeam.name} ${homeTeam.stats.passes}, ${awayTeam.name} ${awayTeam.stats.passes}`);
+  } else if (insight.category === "attacking") {
+    evidence.add(`shot/xG stats: ${homeTeam.name} ${homeTeam.stats.shots} shots/${homeTeam.stats.expectedGoals?.toFixed(2) ?? "n/a"} xG, ${awayTeam.name} ${awayTeam.stats.shots} shots/${awayTeam.stats.expectedGoals?.toFixed(2) ?? "n/a"} xG`);
+  } else if (insight.category === "defensive") {
+    evidence.add(`defensive events: ${homeTeam.name} ${homeTeam.stats.tackles} tackles, ${awayTeam.name} ${awayTeam.stats.tackles} tackles`);
+    evidence.add(`shots conceded/on target context: ${homeTeam.name} ${homeTeam.stats.shotsOnTarget} SOT, ${awayTeam.name} ${awayTeam.stats.shotsOnTarget} SOT`);
+  } else if (insight.category === "tactical") {
+    evidence.add(`camera-space average positions: ${homeTeam.name} x=${homeTeam.averagePosition.x}, ${awayTeam.name} x=${awayTeam.averagePosition.x}`);
+  } else if (insight.category === "physical") {
+    evidence.add(`stable-ID distance estimate: ${homeTeam.name} ${homeTeam.stats.distanceCovered}m, ${awayTeam.name} ${awayTeam.stats.distanceCovered}m`);
+  }
+
+  evidence.add(`affected team scope: ${teamNames}`);
+
+  return {
+    ...insight,
+    source,
+    evidenceUsed: [...evidence].slice(0, 5),
+  };
 }
 
 async function generateInsights(
@@ -397,7 +438,7 @@ affectedTeam: home | away | both`;
       .trim();
     const parsed = JSON.parse(cleaned) as CoachingInsight[];
     return Array.isArray(parsed) && parsed.length > 0
-      ? parsed
+      ? parsed.map((insight) => enrichInsightEvidence(insight, homeTeam, awayTeam, "claude"))
       : buildFallbackInsights(homeTeam, awayTeam);
   } catch {
     return buildFallbackInsights(homeTeam, awayTeam);

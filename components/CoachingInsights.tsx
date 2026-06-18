@@ -88,6 +88,19 @@ export default function CoachingInsights({ insights, homeTeamName, awayTeamName 
               <p className="text-sm text-[#d1fae5] leading-6">{insight.recommendation}</p>
             </div>
 
+            <div className="mt-4 rounded-lg border border-[#1c3020] bg-[#0b130d] p-3">
+              <div className="text-[10px] font-mono text-[#617169] uppercase tracking-[0.22em] mb-2">
+                Powered by {insight.source === "fallback" ? "rules fallback" : "Claude + CV metrics"}
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {(insight.evidenceUsed ?? ["CV/statistical summary"]).slice(0, 4).map((item) => (
+                  <span key={item} className="rounded-md border border-[#1c3020] bg-[#101812] px-2 py-1 text-[10px] leading-4 text-[#8fa097]">
+                    {item}
+                  </span>
+                ))}
+              </div>
+            </div>
+
             <div className="mt-4 grid grid-cols-[116px_1fr_38px] items-center gap-3">
               <span className="text-[10px] font-mono text-[#617169]">model confidence</span>
               <div className="h-1.5 rounded-full bg-[#142014] overflow-hidden">

@@ -398,6 +398,7 @@ function SummaryPanel({ analysis }: { analysis: MatchAnalysis }) {
   const homeWin = analysis.score.home >= analysis.score.away;
   const leading = homeWin ? home : away;
   const trailing = homeWin ? away : home;
+  const scoreLabel = `${home.name} ${analysis.score.home}-${analysis.score.away} ${away.name}`;
   const winPct = Math.min(88, Math.max(52, 50 + Math.abs(analysis.score.home - analysis.score.away) * 14 + Math.abs(home.stats.possession - away.stats.possession) * 0.35));
   const drawPct = Math.max(6, Math.round((100 - winPct) * 0.62));
   const otherPct = Math.max(4, 100 - Math.round(winPct) - drawPct);
@@ -418,10 +419,10 @@ function SummaryPanel({ analysis }: { analysis: MatchAnalysis }) {
             vision ai - match summary
           </div>
           <h1 className="max-w-4xl text-3xl font-black leading-tight text-[#f0fdf4]">
-            {leading.name} {analysis.score.home === analysis.score.away ? "held level after an even tactical contest." : "won on merit by controlling territory and chance quality."}
+            Uploaded clip ends {scoreLabel}.
           </h1>
           <p className="mt-5 max-w-4xl text-base leading-8 text-[#aeb8b0]">
-            The model tracked possession, shot creation, event timing, and player movement to build this report. {leading.name} produced the stronger profile through possession control, shot volume, and better field occupation while {trailing.name} relied on lower-volume moments.
+            The model tracked possession, shot creation, event timing, and player movement inside this uploaded video segment. The outcome profile below describes this clip window only, not a full-match forecast.
           </p>
 
           <div className="mt-7 grid md:grid-cols-2 gap-3">
@@ -440,7 +441,7 @@ function SummaryPanel({ analysis }: { analysis: MatchAnalysis }) {
 
         <div className="border-l border-[#1c3020] pl-8">
           <div className={EYEBROW}>outcome model</div>
-          <div className="mt-2 text-sm text-[#829086]">post-match xG simulation</div>
+          <div className="mt-2 text-sm text-[#829086]">clip-window xG profile, not full-match odds</div>
           {[
             { label: `${leading.name} win`, value: Math.round(winPct), color: "bg-green-400" },
             { label: "Draw", value: drawPct, color: "bg-[#9aa5a0]" },
@@ -458,7 +459,7 @@ function SummaryPanel({ analysis }: { analysis: MatchAnalysis }) {
           ))}
           <div className="mt-20 rounded-lg border border-green-400/30 bg-green-400/10 p-4 text-sm font-bold text-green-200 flex items-center gap-3">
             <Check className="w-5 h-5" />
-            {homeXg === awayXg ? "Balanced outcome profile" : "Deserved result - high confidence"}
+            {homeXg === awayXg ? "Balanced clip profile" : "Clip profile advantage - review with event flags"}
           </div>
         </div>
       </div>
