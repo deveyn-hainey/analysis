@@ -581,6 +581,39 @@ def interpolate_player_positions(
     return frames
 
 
+def annotate_tracking_quality(frames: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Classify frames by whether they are suitable for tactical aggregation.
+
+    Broadcast cutaways and closeups legitimately contain only one or two visible
+    players. Those frames are useful for the video overlay, but if they feed the
+    tactical shape/pass network they make the entire team vanish. Emit an explicit
+    quality flag so the frontend can hold the last wide tactical state.
+    """
+    for frame in frames:
+        players = frame.get("players", [])
+        home = sum(1 for player in players if player.get("team") == "home")
+        away = sum(1 for player in players if player.get("team") == "away")
+        inferred = sum(1 for player in players if player.get("inferred"))
+        total = len(players)
+
+        if total >= 14 and home >= 5 and away >= 5:
+            quality = "wide"
+        elif total <= 6 or home == 0 or away == 0:
+            quality = "closeup"
+        else:
+            quality = "low_confidence"
+
+        frame["trackingQuality"] = quality
+        frame["trackingCounts"] = {
+            "players": total,
+            "home": home,
+            "away": away,
+            "inferred": inferred,
+        }
+
+    return frames
+
+
 def recompute_possession_for_frames(frames: list[dict[str, Any]]) -> list[dict[str, Any]]:
     previous_possession: Union[TeamId, Literal["contested"]] = "contested"
     for frame in frames:
@@ -1023,6 +1056,7 @@ def analyze_video_file(
         dense_frames = consolidate_player_teams(dense_frames)
         dense_frames = interpolate_player_positions(dense_frames)
         dense_frames = recompute_possession_for_frames(interpolate_ball_positions(dense_frames))
+        dense_frames = annotate_tracking_quality(dense_frames)
         if TRACK_DIAGNOSTICS:
             post_ids = [set(player["id"] for player in frame["players"]) for frame in dense_frames]
             avg_kept = sum(len(ids) for ids in post_ids) / max(len(post_ids), 1)
@@ -1077,6 +1111,7 @@ def analyze_frames(request: AnalyzeFramesRequest) -> dict[str, Any]:
     frames = consolidate_player_teams(frames)
     frames = interpolate_player_positions(frames)
     frames = recompute_possession_for_frames(interpolate_ball_positions(frames))
+    frames = annotate_tracking_quality(frames)
 
     return {
         "processingMethod": "yolo-worker",

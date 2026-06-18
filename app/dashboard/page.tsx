@@ -215,6 +215,44 @@ function easeDisplayedFrame(previous: FrameData | null, target: FrameData): Fram
   return { ...target, players: smoothedPlayers, ballPosition };
 }
 
+function trackingTeamCounts(frame: FrameData) {
+  const fallback = {
+    players: frame.players.length,
+    home: frame.players.filter((player) => player.team === "home").length,
+    away: frame.players.filter((player) => player.team === "away").length,
+    inferred: frame.players.filter((player) => player.inferred).length,
+  };
+  return frame.trackingCounts ?? fallback;
+}
+
+function isWideTacticalFrame(frame: FrameData) {
+  if (frame.trackingQuality === "wide") return true;
+  if (frame.trackingQuality === "closeup") return false;
+  const counts = trackingTeamCounts(frame);
+  return counts.players >= 14 && counts.home >= 5 && counts.away >= 5;
+}
+
+function isUsableTacticalFrame(frame: FrameData) {
+  if (isWideTacticalFrame(frame)) return true;
+  if (frame.trackingQuality === "closeup") return false;
+  const counts = trackingTeamCounts(frame);
+  return counts.players >= 8 && counts.home >= 3 && counts.away >= 3;
+}
+
+function nearestTacticalFrame(frames: FrameData[], timestamp: number, fallback: FrameData) {
+  if (!frames.length) return fallback;
+  const sorted = [...frames].sort((a, b) => a.timestamp - b.timestamp);
+  let previous = sorted[0];
+  for (const frame of sorted) {
+    if (frame.timestamp <= timestamp) previous = frame;
+    else break;
+  }
+  const next = sorted.find((frame) => frame.timestamp >= timestamp) ?? sorted[sorted.length - 1];
+  return Math.abs(next.timestamp - timestamp) < Math.abs(previous.timestamp - timestamp)
+    ? next
+    : previous;
+}
+
 type ViewMode = "coach" | "player";
 
 // SVG overlay rendered on top of the video element — draws team-coloured rings
@@ -707,13 +745,13 @@ function PassNetworkPanel({ frames, currentFrame, homeTeamName, awayTeamName }: 
       <div className="relative mx-auto mt-8 aspect-[700/454] max-w-4xl rounded-lg bg-[#09110c]">
         <PitchLines />
         <svg viewBox="0 0 700 454" className="absolute inset-0 h-full w-full">
-          {links.map((link) => {
+          {links.map((link, i) => {
             const node = nodes.find((candidate) => candidate.id === link.from);
             const next = nodes.find((candidate) => candidate.id === link.to);
             if (!node || !next) return null;
             return (
               <line
-                key={`${link.from}-${link.to}`}
+                key={`${link.from}-${link.to}-${i}`}
                 x1={node.position.x * 7}
                 y1={node.position.y * 4.54}
                 x2={next.position.x * 7}
@@ -725,16 +763,16 @@ function PassNetworkPanel({ frames, currentFrame, homeTeamName, awayTeamName }: 
             );
           })}
           {nodes.map((node, i) => (
-            <g key={node.id}>
+            <g key={`${node.id}-${i}`}>
               <circle cx={node.position.x * 7} cy={node.position.y * 4.54} r={14 + (node.touches / maxTouches) * 13} fill={nodeColor} fillOpacity={0.72} stroke={nodeStroke} strokeWidth={2} />
               <text x={node.position.x * 7} y={node.position.y * 4.54 + 5} textAnchor="middle" fill="#061008" fontSize={13} fontWeight={900}>
                 {node.number || i + 1}
               </text>
             </g>
           ))}
-          {currentPlayers.map((player) => (
+          {currentPlayers.map((player, i) => (
             <circle
-              key={`live-${player.id}`}
+              key={`live-${player.id}-${i}`}
               cx={player.position.x * 7}
               cy={player.position.y * 4.54}
               r={5}
@@ -900,6 +938,18 @@ function DashboardContent() {
 
   const currentFrame = renderableFrame(selectedFrame ?? analysis.frames[0]);
   const displayFrame = renderableFrame(liveFrame ?? currentFrame);
+  const trackingFrames = denseFrames.length ? denseFrames : analysis.frames;
+  const wideTacticalFrames = trackingFrames.filter(isWideTacticalFrame);
+  const usableTacticalFrames = wideTacticalFrames.length
+    ? wideTacticalFrames
+    : trackingFrames.filter(isUsableTacticalFrame);
+  const tacticalSourceFrames = usableTacticalFrames.length ? usableTacticalFrames : trackingFrames;
+  const tacticalFrame = renderableFrame(
+    nearestTacticalFrame(tacticalSourceFrames, displayFrame.timestamp, displayFrame)
+  );
+  const tacticalHeld =
+    Math.abs(tacticalFrame.timestamp - displayFrame.timestamp) > 0.35 &&
+    !isUsableTacticalFrame(displayFrame);
   const frameImage = currentFrame ? frameImageStore.get(currentFrame.frameIndex) : null;
 
   const seekTo = (timestamp: number) => {
@@ -1034,11 +1084,16 @@ function DashboardContent() {
           <h2 className="mt-3 text-xl font-black text-[#f0fdf4]">Current Shape</h2>
         </div>
         <span className="rounded-lg border border-[#1c3020] px-3 py-1.5 text-xs font-mono text-[#829086]">
-          {formatDuration(displayFrame.timestamp)}
+          {formatDuration(tacticalFrame.timestamp)}
         </span>
       </div>
+      {tacticalHeld && (
+        <div className="mt-4 inline-flex rounded-lg border border-yellow-400/25 bg-yellow-400/10 px-3 py-1.5 text-xs font-mono text-yellow-300">
+          holding last wide tactical frame during close-up
+        </div>
+      )}
       <div className="mt-6 mx-auto max-w-4xl">
-        <SoccerField frame={displayFrame} />
+        <SoccerField frame={tacticalFrame} />
       </div>
     </div>
   );
@@ -1226,7 +1281,7 @@ function DashboardContent() {
 
             <div className="grid lg:grid-cols-2 gap-4">
               {tacticalFramePanel}
-              <PassNetworkPanel frames={denseFrames.length ? denseFrames : analysis.frames} currentFrame={displayFrame} homeTeamName={analysis.homeTeam.name} awayTeamName={analysis.awayTeam.name} />
+              <PassNetworkPanel frames={tacticalSourceFrames} currentFrame={tacticalFrame} homeTeamName={analysis.homeTeam.name} awayTeamName={analysis.awayTeam.name} />
             </div>
 
             <div className="grid lg:grid-cols-[1.35fr_0.65fr] gap-4">
