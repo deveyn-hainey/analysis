@@ -317,6 +317,46 @@ function resizeFramesForReview(
   );
 }
 
+// Frames the vision synthesis pass should actually look at. Event types that
+// carry the most tactical signal — goals, shots, saves, set pieces, cards.
+const KEY_EVENT_TYPES = new Set<MatchEvent["type"]>([
+  "goal", "shot", "save", "corner", "freekick", "card_yellow", "card_red", "card_unknown",
+]);
+const KEY_FRAME_TARGET = 12;
+
+// Curate the frames sent to /summarize for vision synthesis: every frame that
+// contains a key event, topped up with evenly-spaced frames so the model sees
+// build-up play and tactical shape, not just the moments around events. Frames
+// are downsized (640×360) to keep the multi-image payload small.
+async function selectKeyFrames(analyzed: FrameData[]): Promise<RawFrame[]> {
+  if (analyzed.length === 0) return [];
+
+  const chosen = new Map<number, number>(); // frameIndex -> timestamp
+  for (const f of analyzed) {
+    if (f.events.some((e) => KEY_EVENT_TYPES.has(e.type))) chosen.set(f.frameIndex, f.timestamp);
+  }
+
+  if (chosen.size < KEY_FRAME_TARGET) {
+    const need = KEY_FRAME_TARGET - chosen.size;
+    const step = Math.max(1, Math.floor(analyzed.length / (need + 1)));
+    for (let i = 0; i < analyzed.length && chosen.size < KEY_FRAME_TARGET; i += step) {
+      const f = analyzed[i];
+      if (!chosen.has(f.frameIndex)) chosen.set(f.frameIndex, f.timestamp);
+    }
+  }
+
+  const raw = [...chosen.entries()]
+    .sort((a, b) => a[1] - b[1])
+    .slice(0, KEY_FRAME_TARGET)
+    .map(([index, timestamp]) => {
+      const base64 = frameImageStore.get(index);
+      return base64 ? { base64, timestamp } : null;
+    })
+    .filter((x): x is RawFrame => x !== null);
+
+  return resizeFramesForReview(raw);
+}
+
 async function reviewEventsWithClaude(
   rawFrames: RawFrame[],
   frames: FrameData[],
@@ -501,10 +541,12 @@ export default function HomePage() {
         setStatusDetail("Building match insights…");
         setProgress(88);
 
+        const keyFrames = await selectKeyFrames(analyzedFrames);
+
         const sumRes = await fetch("/api/analyze/summarize", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ frames: analyzedFrames, eventReviewWarnings }),
+          body: JSON.stringify({ frames: analyzedFrames, eventReviewWarnings, keyFrames }),
         });
 
         if (!sumRes.ok) {

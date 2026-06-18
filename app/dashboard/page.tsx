@@ -399,9 +399,25 @@ function SummaryPanel({ analysis }: { analysis: MatchAnalysis }) {
   const leading = homeWin ? home : away;
   const trailing = homeWin ? away : home;
   const scoreLabel = `${home.name} ${analysis.score.home}-${analysis.score.away} ${away.name}`;
-  const winPct = Math.min(88, Math.max(52, 50 + Math.abs(analysis.score.home - analysis.score.away) * 14 + Math.abs(home.stats.possession - away.stats.possession) * 0.35));
-  const drawPct = Math.max(6, Math.round((100 - winPct) * 0.62));
-  const otherPct = Math.max(4, 100 - Math.round(winPct) - drawPct);
+
+  // Prefer the vision synthesis model's projection; fall back to the legacy
+  // score/possession heuristic for analyses produced before the model ran.
+  const fallbackLead = Math.min(88, Math.max(52, 50 + Math.abs(analysis.score.home - analysis.score.away) * 14 + Math.abs(home.stats.possession - away.stats.possession) * 0.35));
+  const fallbackDraw = Math.max(6, Math.round((100 - fallbackLead) * 0.62));
+  const fallbackOther = Math.max(4, 100 - Math.round(fallbackLead) - fallbackDraw);
+  const outcome = analysis.outcome ?? {
+    homeWin: homeWin ? Math.round(fallbackLead) : fallbackOther,
+    draw: fallbackDraw,
+    awayWin: homeWin ? fallbackOther : Math.round(fallbackLead),
+    reasoning: "",
+    source: "fallback" as const,
+  };
+  const outcomeRows = [
+    { label: `${home.name} win`, value: outcome.homeWin },
+    { label: "Draw", value: outcome.draw },
+    { label: `${away.name} win`, value: outcome.awayWin },
+  ];
+  const outcomeMax = Math.max(...outcomeRows.map((r) => r.value));
 
   const chips = [
     { code: "CTL", text: `${leading.name} controlled ${leading.stats.possession}% possession.`, tone: "green" },
@@ -441,25 +457,26 @@ function SummaryPanel({ analysis }: { analysis: MatchAnalysis }) {
 
         <div className="border-l border-[#1c3020] pl-8">
           <div className={EYEBROW}>outcome model</div>
-          <div className="mt-2 text-sm text-[#829086]">clip-window xG profile, not full-match odds</div>
-          {[
-            { label: `${leading.name} win`, value: Math.round(winPct), color: "bg-green-400" },
-            { label: "Draw", value: drawPct, color: "bg-[#9aa5a0]" },
-            { label: `${trailing.name} win`, value: otherPct, color: "bg-slate-400" },
-          ].map((row) => (
+          <div className="mt-2 text-sm text-[#829086]">
+            {outcome.source === "vision" ? "vision-grounded projection for this clip window" : "heuristic projection (vision model unavailable)"}
+          </div>
+          {outcomeRows.map((row) => (
             <div key={row.label} className="mt-7">
               <div className="flex justify-between text-sm text-[#c8d2ca]">
                 <span>{row.label}</span>
                 <span className="font-black">{row.value}%</span>
               </div>
               <div className="mt-2 h-2 rounded-full bg-[#142014] overflow-hidden">
-                <div className={`h-full rounded-full ${row.color}`} style={{ width: `${row.value}%` }} />
+                <div
+                  className={`h-full rounded-full ${row.value === outcomeMax ? "bg-green-400" : "bg-[#9aa5a0]"}`}
+                  style={{ width: `${row.value}%` }}
+                />
               </div>
             </div>
           ))}
-          <div className="mt-20 rounded-lg border border-green-400/30 bg-green-400/10 p-4 text-sm font-bold text-green-200 flex items-center gap-3">
-            <Check className="w-5 h-5" />
-            {homeXg === awayXg ? "Balanced clip profile" : "Clip profile advantage - review with event flags"}
+          <div className="mt-10 rounded-lg border border-green-400/30 bg-green-400/10 p-4 text-sm leading-6 text-green-100 flex items-start gap-3">
+            <Check className="w-5 h-5 shrink-0 mt-0.5" />
+            <span>{outcome.reasoning?.trim() || (homeXg === awayXg ? "Balanced clip profile" : "Clip profile advantage - review with event flags")}</span>
           </div>
         </div>
       </div>
@@ -503,6 +520,19 @@ function XgMomentumPanel({ analysis }: { analysis: MatchAnalysis }) {
   const awayEvents = analysis.keyEvents.filter((event) => event.team === "away" && ["shot", "goal", "save"].includes(event.type));
   const duration = Math.max(analysis.videoDuration, 1);
 
+  // Adaptive time axis: the curve is already scaled to the real clip length, so
+  // the labels under it must match. Short clips read in seconds / mm:ss instead
+  // of a fixed 0–90' match scale, which would otherwise mislabel a 2-minute clip
+  // as a full match.
+  const useSeconds = duration < 300; // under 5 minutes
+  const fmtTime = (s: number) => {
+    if (duration < 90) return `${Math.round(s)}s`;
+    const m = Math.floor(s / 60);
+    return `${m}:${String(Math.round(s % 60)).padStart(2, "0")}`;
+  };
+  const AXIS_TICKS = 6;
+  const axisTicks = Array.from({ length: AXIS_TICKS + 1 }, (_, i) => (duration * i) / AXIS_TICKS);
+
   const buildPath = (events: typeof analysis.keyEvents, totalXg: number) => {
     const sorted = [...events].sort((a, b) => a.timestamp - b.timestamp);
     let current = 0;
@@ -531,7 +561,7 @@ function XgMomentumPanel({ analysis }: { analysis: MatchAnalysis }) {
       <div className="flex items-start justify-between gap-4">
         <div>
           <div className={EYEBROW}>expected goals momentum</div>
-          <h2 className="mt-3 text-xl font-black text-[#f0fdf4]">Cumulative xG by minute</h2>
+          <h2 className="mt-3 text-xl font-black text-[#f0fdf4]">Cumulative xG by {useSeconds ? "second" : "minute"}</h2>
         </div>
         <div className="flex items-center gap-4 text-xs font-mono">
           <span className="text-green-300">● {analysis.homeTeam.name} {homeXg.toFixed(2)}</span>
@@ -556,14 +586,14 @@ function XgMomentumPanel({ analysis }: { analysis: MatchAnalysis }) {
               <line x1={x} x2={x} y1={38} y2={290} stroke="#fde047" strokeWidth={1} strokeDasharray="3 5" opacity={0.5} />
               <path d={`M ${x - 6} 28 L ${x + 6} 28 L ${x} 44 Z`} fill="#fde047" />
               <text x={x + 8} y={i % 2 ? 70 : 54} fill="#fde047" fontSize={10} fontFamily="monospace">
-                {Math.floor(event.timestamp / 60)}'
+                {fmtTime(event.timestamp)}
               </text>
             </g>
           );
         })}
-        {[0, 15, 30, 45, 60, 75, 90].map((minute) => (
-          <text key={minute} x={40 + (minute / 90) * 620} y={315} fill="#617169" fontSize={12} textAnchor="middle" fontFamily="monospace">
-            {minute}'
+        {axisTicks.map((t, i) => (
+          <text key={i} x={40 + (t / duration) * 620} y={315} fill="#617169" fontSize={12} textAnchor="middle" fontFamily="monospace">
+            {fmtTime(t)}
           </text>
         ))}
       </svg>

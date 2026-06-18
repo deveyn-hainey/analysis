@@ -4,6 +4,7 @@ import type {
   MatchAnalysis,
   FrameData,
   MatchEvent,
+  OutcomeProjection,
   TeamAnalysis,
   CoachingInsight,
   SummarizeRequest,
@@ -18,8 +19,7 @@ import {
   stableTrackingCoverage,
   teamExpectedGoals,
 } from "@/lib/visionMetrics";
-
-const SUMMARY_MODEL = process.env.ANTHROPIC_SUMMARY_MODEL ?? "claude-sonnet-4-6";
+import { runVisionSynthesis, shotKey, type SynthesisKeyFrame } from "@/lib/visionSynthesis";
 
 function calcDistanceCovered(teamId: TeamId, frames: FrameData[]): number {
   let total = 0;
@@ -359,73 +359,68 @@ function enrichInsightEvidence(
   };
 }
 
-async function generateInsights(
+// Deterministic outcome projection used when the vision synthesis call fails or
+// returns nothing. Mirrors the old client-side heuristic (score gap + possession
+// gap) so the dashboard always has a populated outcome model.
+function buildFallbackOutcome(homeTeam: TeamAnalysis, awayTeam: TeamAnalysis): OutcomeProjection {
+  const scoreGap = homeTeam.stats.goals - awayTeam.stats.goals;
+  const possGap = homeTeam.stats.possession - awayTeam.stats.possession;
+  const leadPct = Math.min(88, Math.max(52, 50 + Math.abs(scoreGap) * 14 + Math.abs(possGap) * 0.35));
+  const draw = Math.max(6, Math.round((100 - leadPct) * 0.62));
+  const other = Math.max(4, 100 - Math.round(leadPct) - draw);
+  const homeLeads = scoreGap > 0 || (scoreGap === 0 && possGap >= 0);
+  return {
+    homeWin: homeLeads ? Math.round(leadPct) : other,
+    draw,
+    awayWin: homeLeads ? other : Math.round(leadPct),
+    reasoning: "Heuristic projection from score and possession gap (vision synthesis unavailable).",
+    source: "fallback",
+  };
+}
+
+interface SynthesisOutput {
+  insights: CoachingInsight[];
+  outcome: OutcomeProjection;
+  shotXg: Map<string, number>;
+}
+
+// Runs the single vision-grounded synthesis call (Opus 4.8, multi-image) and
+// adapts its output to the shapes the rest of the route expects. Falls back to
+// deterministic insights/outcome on any failure so a flaky model call never
+// breaks the analysis.
+async function generateSynthesis(
   client: Anthropic,
   homeTeam: TeamAnalysis,
   awayTeam: TeamAnalysis,
-  eventConflicts: MatchAnalysis["eventConflicts"] = []
-): Promise<CoachingInsight[]> {
-  const prompt = `You are an elite soccer performance analyst reviewing a short match clip.
-
-Generate 4–5 specific, actionable coaching insights using the numbers below. If some stats are low or zero, infer from what you can see — possession dominance, goal conversion, and player positioning are all meaningful even in short clips.
-
-HOME (${homeTeam.name}):
-- Possession: ${homeTeam.stats.possession}%
-- Passes: ${homeTeam.stats.passes} (accuracy est. ${homeTeam.stats.passAccuracy}%)
-- Shots: ${homeTeam.stats.shots} (on target: ${homeTeam.stats.shotsOnTarget}) | Goals: ${homeTeam.stats.goals} | xG: ${homeTeam.stats.expectedGoals?.toFixed(2) ?? "n/a"}
-- Metric confidence: possession ${homeTeam.stats.metricConfidence?.possession ?? 0}, passes ${homeTeam.stats.metricConfidence?.passes ?? 0}, shots ${homeTeam.stats.metricConfidence?.shots ?? 0}, distance ${homeTeam.stats.metricConfidence?.distance ?? 0}
-- Tackles: ${homeTeam.stats.tackles} | Fouls: ${homeTeam.stats.fouls} | Corners: ${homeTeam.stats.corners}
-- Avg player x-position: ${homeTeam.averagePosition.x}/100 (0=own goal, 100=opponent goal)
-
-AWAY (${awayTeam.name}):
-- Possession: ${awayTeam.stats.possession}%
-- Passes: ${awayTeam.stats.passes} (accuracy est. ${awayTeam.stats.passAccuracy}%)
-- Shots: ${awayTeam.stats.shots} (on target: ${awayTeam.stats.shotsOnTarget}) | Goals: ${awayTeam.stats.goals} | xG: ${awayTeam.stats.expectedGoals?.toFixed(2) ?? "n/a"}
-- Metric confidence: possession ${awayTeam.stats.metricConfidence?.possession ?? 0}, passes ${awayTeam.stats.metricConfidence?.passes ?? 0}, shots ${awayTeam.stats.metricConfidence?.shots ?? 0}, distance ${awayTeam.stats.metricConfidence?.distance ?? 0}
-- Tackles: ${awayTeam.stats.tackles} | Fouls: ${awayTeam.stats.fouls} | Corners: ${awayTeam.stats.corners}
-- Avg player x-position: ${awayTeam.averagePosition.x}/100
-
-EVENT CONFLICTS / REVIEW FLAGS:
-${eventConflicts.length > 0
-  ? eventConflicts.slice(0, 6).map((event) =>
-      `- ${event.timestamp.toFixed(1)}s ${event.type}: ${(event.conflicts ?? []).join("; ") || event.pipelineFlag || "review flag"}`
-    ).join("\n")
-  : "- None"}
-
-Return ONLY a valid JSON array — no markdown, no code fences:
-[{
-  "id": "i1",
-  "category": "attacking",
-  "priority": "high",
-  "title": "short title",
-  "observation": "what the data shows",
-  "recommendation": "specific actionable step for training or tactics",
-  "affectedTeam": "home"
-}]
-
-category: attacking | defensive | possession | tactical | physical
-priority: critical | high | medium | low
-affectedTeam: home | away | both`;
-
+  shotEvents: MatchEvent[],
+  eventConflicts: NonNullable<MatchAnalysis["eventConflicts"]>,
+  keyFrames: SynthesisKeyFrame[]
+): Promise<SynthesisOutput> {
   try {
-    const response = await client.messages.create({
-      model: SUMMARY_MODEL,
-      max_tokens: 2048,
-      messages: [{ role: "user", content: prompt }],
+    const result = await runVisionSynthesis(client, {
+      homeTeam,
+      awayTeam,
+      shotEvents,
+      eventConflicts,
+      keyFrames,
     });
 
-    const raw =
-      response.content[0].type === "text" ? response.content[0].text.trim() : "";
-    const cleaned = raw
-      .replace(/^```(?:json)?\s*/i, "")
-      .replace(/\s*```$/i, "")
-      .trim();
-    const parsed = JSON.parse(cleaned) as CoachingInsight[];
-    return Array.isArray(parsed) && parsed.length > 0
-      ? parsed.map((insight) => enrichInsightEvidence(insight, homeTeam, awayTeam, "claude"))
-      : buildFallbackInsights(homeTeam, awayTeam);
+    const insights =
+      result.insights.length > 0
+        ? result.insights.map((insight) => enrichInsightEvidence(insight, homeTeam, awayTeam, "claude"))
+        : buildFallbackInsights(homeTeam, awayTeam);
+
+    const outcome: OutcomeProjection = result.outcome
+      ? { ...result.outcome, source: "vision" }
+      : buildFallbackOutcome(homeTeam, awayTeam);
+
+    return { insights, outcome, shotXg: result.shotXg };
   } catch {
-    return buildFallbackInsights(homeTeam, awayTeam);
+    return {
+      insights: buildFallbackInsights(homeTeam, awayTeam),
+      outcome: buildFallbackOutcome(homeTeam, awayTeam),
+      shotXg: new Map(),
+    };
   }
 }
 
@@ -440,7 +435,7 @@ export async function POST(req: NextRequest) {
     }
 
     const body = (await req.json()) as SummarizeRequest;
-    const { frames, eventReviewWarnings } = body;
+    const { frames, eventReviewWarnings, keyFrames } = body;
 
     if (!frames || frames.length === 0) {
       return NextResponse.json({ error: "No frames provided." }, { status: 400 });
@@ -459,11 +454,34 @@ export async function POST(req: NextRequest) {
     const eventConflicts = buildEventConflicts(allEvents);
     const scoreboardScore = scoreFromScoreboard(frames);
 
-    const homeTeam = buildTeamAnalysis("home", frames, allEvents, scoreboardScore);
-    const awayTeam = buildTeamAnalysis("away", frames, allEvents, scoreboardScore);
+    // Team analysis built first to give the synthesis model numeric context.
+    // Rebuilt below once vision xG is merged so the displayed team xG reflects it.
+    const homeTeamPre = buildTeamAnalysis("home", frames, allEvents, scoreboardScore);
+    const awayTeamPre = buildTeamAnalysis("away", frames, allEvents, scoreboardScore);
+    const shotEvents = shotLikeEvents(allEvents);
 
     const client = new Anthropic({ apiKey });
-    const insights = await generateInsights(client, homeTeam, awayTeam, eventConflicts);
+    const synthesis = await generateSynthesis(
+      client,
+      homeTeamPre,
+      awayTeamPre,
+      shotEvents,
+      eventConflicts ?? [],
+      (keyFrames ?? []) as SynthesisKeyFrame[]
+    );
+
+    // Merge per-shot vision xG onto matching events; tag every shot-like event
+    // with whether its xG came from the model looking at the frame or the formula.
+    const keyEvents: MatchEvent[] = allEvents.map((event) => {
+      if (!["shot", "goal", "save"].includes(event.type)) return event;
+      const visionXg = synthesis.shotXg.get(shotKey(event.timestamp));
+      return visionXg != null
+        ? { ...event, xg: visionXg, xgSource: "vision" as const }
+        : { ...event, xgSource: "positional" as const };
+    });
+
+    const homeTeam = buildTeamAnalysis("home", frames, keyEvents, scoreboardScore);
+    const awayTeam = buildTeamAnalysis("away", frames, keyEvents, scoreboardScore);
 
     const analysis: MatchAnalysis = {
       id: `match-${Date.now()}`,
@@ -473,18 +491,20 @@ export async function POST(req: NextRequest) {
       homeTeam,
       awayTeam,
       frames,
-      keyEvents: allEvents,
+      keyEvents,
       eventConflicts,
       analysisWarnings: [
         "Replay and broadcast angle changes are flagged when detected, but may still require coach review.",
         "Possession is sampled from frame-level visual evidence, not counted as timeline events.",
+        "Pass accuracy and distance covered are low-confidence: player IDs are assigned per frame, so cross-frame passing and movement can't be tracked reliably from broadcast angle.",
         ...(scoreboardScore ? ["Final score is taken from scoreboard reads; goal timeline only includes score changes observed after the clip baseline."] : []),
         ...(eventReviewWarnings ?? []),
       ],
-      insights,
+      insights: synthesis.insights,
+      outcome: synthesis.outcome,
       score: {
-        home: scoreboardScore?.home ?? countEventType(allEvents, "goal", "home"),
-        away: scoreboardScore?.away ?? countEventType(allEvents, "goal", "away"),
+        home: scoreboardScore?.home ?? countEventType(keyEvents, "goal", "home"),
+        away: scoreboardScore?.away ?? countEventType(keyEvents, "goal", "away"),
       },
       processingMethod: "ai",
     };

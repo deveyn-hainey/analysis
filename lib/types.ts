@@ -58,7 +58,22 @@ export interface MatchEvent {
   conflicts?: string[];
   pipelineFlag?: "missed_detection" | "scoreboard_conflict" | "replay_suspected" | "verifier_conflict" | "low_confidence";
   xg?: number;
+  // How the xG figure was produced: "vision" = Claude looked at the shot frame
+  // (keeper/defender positions, body shape, angle); "positional" = estimateShotXg
+  // formula from event location only.
+  xgSource?: "vision" | "positional";
   source?: "cv" | "heuristic" | "llm" | "scoreboard" | "fallback";
+}
+
+// Win/draw/loss style projection for the clip. Produced by the vision synthesis
+// model from numeric metrics + key frames, not a hardcoded formula. Scoped to the
+// passage of play in the clip, not a full-match prediction.
+export interface OutcomeProjection {
+  homeWin: number; // 0–100, sums to ~100 with draw + awayWin
+  draw: number;
+  awayWin: number;
+  reasoning: string;
+  source: "vision" | "fallback";
 }
 
 export interface FrameData {
@@ -138,6 +153,7 @@ export interface MatchAnalysis {
   }>;
   analysisWarnings?: string[];
   insights: CoachingInsight[];
+  outcome?: OutcomeProjection;
   score: { home: number; away: number };
   processingMethod: "ai" | "demo";
 }
@@ -164,6 +180,11 @@ export interface SummarizeRequest {
   // failed and fell back to heuristic-only events) — surfaced to the coach instead
   // of being silently discarded, since it explains why some events lack full review.
   eventReviewWarnings?: string[];
+  // Curated key frames (downsized JPEG base64) for the vision synthesis pass —
+  // event frames plus evenly-sampled coverage. Lets the summary model actually
+  // see the play instead of reasoning over numbers alone. Omitted → text-only
+  // synthesis fallback.
+  keyFrames?: Array<{ timestamp: number; base64: string }>;
 }
 
 export interface AnalyzeEventsRequest {
