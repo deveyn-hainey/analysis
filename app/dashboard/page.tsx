@@ -216,6 +216,26 @@ function easeDisplayedFrame(previous: FrameData | null, target: FrameData): Fram
 }
 
 type ViewMode = "coach" | "player";
+type FieldOrientation = "broadcast" | "mirrored";
+
+function orientPosition(position: Position, orientation: FieldOrientation): Position {
+  return orientation === "mirrored"
+    ? { x: 100 - position.x, y: position.y }
+    : position;
+}
+
+function orientFrameForField(frame: FrameData, orientation: FieldOrientation): FrameData {
+  if (orientation === "broadcast") return frame;
+  return {
+    ...frame,
+    players: frame.players.map((player) => ({
+      ...player,
+      position: orientPosition(player.position, orientation),
+    })),
+    ballPosition: frame.ballPosition ? orientPosition(frame.ballPosition, orientation) : undefined,
+    referees: frame.referees?.map((position) => orientPosition(position, orientation)),
+  };
+}
 
 // SVG overlay rendered on top of the video element — draws team-coloured rings
 // at players' feet, matching the lightweight tracking style from the model repo.
@@ -791,6 +811,7 @@ function DashboardContent() {
   const [activeHeatmapTeam, setActiveHeatmapTeam] = useState<"home" | "away">("home");
   const [viewMode, setViewMode] = useState<ViewMode>("coach");
   const [pitchView, setPitchView] = useState<"frame" | "tactical">("tactical");
+  const [fieldOrientation, setFieldOrientation] = useState<FieldOrientation>("broadcast");
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [denseFrames, setDenseFrames] = useState<import("@/lib/types").FrameData[]>([]);
   const [denseStatus, setDenseStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
@@ -900,6 +921,10 @@ function DashboardContent() {
 
   const currentFrame = renderableFrame(selectedFrame ?? analysis.frames[0]);
   const displayFrame = renderableFrame(liveFrame ?? currentFrame);
+  const fieldFrame = orientFrameForField(displayFrame, fieldOrientation);
+  const passNetworkFrames = (denseFrames.length ? denseFrames : analysis.frames).map((frame) =>
+    orientFrameForField(frame, fieldOrientation)
+  );
   const frameImage = currentFrame ? frameImageStore.get(currentFrame.frameIndex) : null;
 
   const seekTo = (timestamp: number) => {
@@ -1033,12 +1058,28 @@ function DashboardContent() {
           <div className={EYEBROW}>tactical frame</div>
           <h2 className="mt-3 text-xl font-black text-[#f0fdf4]">Current Shape</h2>
         </div>
-        <span className="rounded-lg border border-[#1c3020] px-3 py-1.5 text-xs font-mono text-[#829086]">
-          {formatDuration(displayFrame.timestamp)}
-        </span>
+        <div className="flex items-center gap-2">
+          <div className="flex rounded-lg border border-[#1c3020] overflow-hidden text-xs">
+            <button
+              onClick={() => setFieldOrientation("broadcast")}
+              className={`px-3 py-1.5 transition-colors ${fieldOrientation === "broadcast" ? "bg-green-400 text-black font-medium" : "text-[#6b9e6b] hover:text-[#f0fdf4]"}`}
+            >
+              Normal
+            </button>
+            <button
+              onClick={() => setFieldOrientation("mirrored")}
+              className={`px-3 py-1.5 transition-colors ${fieldOrientation === "mirrored" ? "bg-green-400 text-black font-medium" : "text-[#6b9e6b] hover:text-[#f0fdf4]"}`}
+            >
+              Mirror
+            </button>
+          </div>
+          <span className="rounded-lg border border-[#1c3020] px-3 py-1.5 text-xs font-mono text-[#829086]">
+            {formatDuration(displayFrame.timestamp)}
+          </span>
+        </div>
       </div>
       <div className="mt-6 mx-auto max-w-4xl">
-        <SoccerField frame={displayFrame} />
+        <SoccerField frame={fieldFrame} />
       </div>
     </div>
   );
@@ -1226,7 +1267,7 @@ function DashboardContent() {
 
             <div className="grid lg:grid-cols-2 gap-4">
               {tacticalFramePanel}
-              <PassNetworkPanel frames={denseFrames.length ? denseFrames : analysis.frames} currentFrame={displayFrame} homeTeamName={analysis.homeTeam.name} awayTeamName={analysis.awayTeam.name} />
+              <PassNetworkPanel frames={passNetworkFrames} currentFrame={fieldFrame} homeTeamName={analysis.homeTeam.name} awayTeamName={analysis.awayTeam.name} />
             </div>
 
             <div className="grid lg:grid-cols-[1.35fr_0.65fr] gap-4">
