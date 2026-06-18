@@ -211,6 +211,35 @@ KIT_COLOR_HSV: dict[str, tuple[float, float, float]] = {
 }
 
 
+def _validate_kit_config() -> None:
+    configured = [color for color in (HOME_KIT_COLOR, AWAY_KIT_COLOR) if color]
+    unsupported = [color for color in configured if color not in KIT_COLOR_HSV]
+    if unsupported:
+        logger.warning(
+            "Unsupported YOLO_*_KIT_COLOR value(s) %s. Supported colors are %s. "
+            "Team assignment will fall back to unsupervised clustering when either side is unsupported.",
+            unsupported,
+            sorted(KIT_COLOR_HSV.keys()),
+        )
+        return
+    if HOME_KIT_COLOR and AWAY_KIT_COLOR:
+        logger.info(
+            "team-color: home kit=%s renders as home/red; away kit=%s renders as away/blue",
+            HOME_KIT_COLOR,
+            AWAY_KIT_COLOR,
+        )
+    elif HOME_KIT_COLOR or AWAY_KIT_COLOR:
+        logger.warning(
+            "Both YOLO_HOME_KIT_COLOR and YOLO_AWAY_KIT_COLOR are required for anchored team assignment. "
+            "Received home=%r away=%r; falling back to unsupervised clustering.",
+            HOME_KIT_COLOR,
+            AWAY_KIT_COLOR,
+        )
+
+
+_validate_kit_config()
+
+
 def hsv_to_circular_signature(hue: float, sat: float, val: float) -> np.ndarray:
     radians = (hue / 180.0) * 2.0 * np.pi
     return np.array([np.cos(radians) * sat, np.sin(radians) * sat, sat, val], dtype=np.float32)
