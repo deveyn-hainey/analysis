@@ -176,43 +176,27 @@ function countEventType(events: MatchEvent[], type: string, team?: "home" | "awa
 }
 
 function scoreFromScoreboard(frames: FrameData[]): { home: number; away: number } | null {
-  const readings = frames
-    .filter((frame) =>
-      frame.scoreboard &&
-      Number.isFinite(frame.scoreboard.home) &&
-      Number.isFinite(frame.scoreboard.away) &&
-      frame.scoreboard.home >= 0 &&
-      frame.scoreboard.away >= 0 &&
-      frame.scoreboard.home <= 20 &&
-      frame.scoreboard.away <= 20
-    )
-    .map((frame) => ({
-      home: frame.scoreboard!.home,
-      away: frame.scoreboard!.away,
-      timestamp: frame.timestamp,
-    }))
-    .sort((a, b) => a.timestamp - b.timestamp);
-
-  if (!readings.length) return null;
-
-  const lastTimestamp = readings[readings.length - 1].timestamp;
-  const recent = readings.filter((reading) => reading.timestamp >= lastTimestamp - 12);
-  const candidates = recent.length ? recent : readings;
-  const tallies = new Map<string, { home: number; away: number; count: number; latest: number }>();
-
-  for (const reading of candidates) {
-    const key = `${reading.home}-${reading.away}`;
-    const existing = tallies.get(key);
-    tallies.set(key, {
-      home: reading.home,
-      away: reading.away,
-      count: (existing?.count ?? 0) + 1,
-      latest: Math.max(existing?.latest ?? 0, reading.timestamp),
-    });
+  let hasReading = false;
+  let home = 0;
+  let away = 0;
+  for (const frame of [...frames].sort((a, b) => a.timestamp - b.timestamp)) {
+    const board = frame.scoreboard;
+    if (
+      !board ||
+      !Number.isFinite(board.home) ||
+      !Number.isFinite(board.away) ||
+      board.home < 0 ||
+      board.away < 0 ||
+      board.home > 20 ||
+      board.away > 20
+    ) {
+      continue;
+    }
+    hasReading = true;
+    home = Math.max(home, board.home);
+    away = Math.max(away, board.away);
   }
-
-  const [best] = [...tallies.values()].sort((a, b) => b.count - a.count || b.latest - a.latest);
-  return best ? { home: best.home, away: best.away } : null;
+  return hasReading ? { home, away } : null;
 }
 
 function buildTeamAnalysis(

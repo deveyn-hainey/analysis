@@ -352,13 +352,13 @@ function SystemHeader({
           </div>
 
           <div className="text-center min-w-[240px]">
-            <div className={EYEBROW}>full time</div>
+            <div className={EYEBROW}>clip end</div>
             <div className="font-mono text-6xl font-black leading-none text-[#f0fdf4]">
               <span className="text-green-300">{analysis.score.home}</span>
               <span className="px-6 text-[#5f7567]">-</span>
               <span>{analysis.score.away}</span>
             </div>
-            <div className="mt-3 text-sm text-[#829086]">Computer vision analysis</div>
+            <div className="mt-3 text-sm text-[#829086]">Final visible scoreboard in uploaded video</div>
           </div>
 
           <div className="flex items-center justify-end gap-4">
