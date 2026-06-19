@@ -82,7 +82,16 @@ Rules:
 - For goals, include an entry ONLY when you can see the ball fully cross the goal line into the net, or an unambiguous goal celebration/kickoff restart. Attribute to the team that scored (the attacking team, not the goalkeeper's team). Be conservative — omit anything uncertain. Use [] when no goal is clearly visible.
 - outcome.homeWin + outcome.draw + outcome.awayWin MUST sum to 100. This is a projection for THIS passage of play, not a full-match prediction — reflect the momentum and chances visible in the clip.
 - Produce 4-5 insights. Prefer observations only the frames reveal (shape, line height, finishing technique) over restating the numbers.
+- In the summary, use scoreboard/team names when available, but do NOT describe teams as "home", "away", or by kit color. Avoid parentheticals like "(home, in white)" because team-side and kit-color assignment may be uncertain.
 - For shotXg, only include timestamps present in the SHOTS list below; estimate xG from the visible chance quality (angle, distance, defenders, keeper position). Omit shots you cannot see clearly.`;
+
+function scrubTeamColorClaims(summary: string): string {
+  return summary
+    .replace(/\s*\((?:home|away)(?:\s*,?\s*(?:in|wearing)\s+[a-z]+)?\)/gi, "")
+    .replace(/\s*\((?:in|wearing)\s+[a-z]+\)/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
 
 function buildContextText(
   homeTeam: TeamAnalysis,
@@ -201,7 +210,7 @@ export async function runVisionSynthesis(
 
   return {
     outcome: normalizeOutcome(parsed.outcome),
-    summary: (parsed.summary ?? "").trim(),
+    summary: scrubTeamColorClaims(parsed.summary ?? ""),
     goals,
     insights,
     shotXg,

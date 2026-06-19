@@ -67,6 +67,10 @@ AWAY_KIT_COLOR = os.getenv("YOLO_AWAY_KIT_COLOR", "").strip().lower()
 DEFAULT_DENSE_FPS = float(os.getenv("YOLO_DENSE_FPS", "15"))
 TRACK_SMOOTHING_ALPHA = float(os.getenv("YOLO_TRACK_SMOOTHING_ALPHA", "0.35"))
 BALL_INTERPOLATION_LIMIT = int(os.getenv("YOLO_BALL_INTERPOLATION_LIMIT", "30"))
+# Fill short leading/trailing ball gaps from the nearest reliable detection. This
+# helps the overlay stay continuous when the detector drops the tiny ball for a
+# few frames, without carrying it through long unknown sequences.
+BALL_COAST_LIMIT = int(os.getenv("YOLO_BALL_COAST_LIMIT", "12"))
 # Max consecutive frames a player can be missing before we stop coasting their
 # position. ~0.7s at 15fps — long enough to bridge occlusion blips, short enough
 # not to leave a ghost where a player has actually left the frame.
@@ -748,11 +752,25 @@ def smooth_possession(
     return nearest["team"]
 
 
+def ball_anchor_from_players(
+    frame: dict[str, Any],
+    anchor: dict[str, float],
+    max_player_distance: float = 14.0,
+) -> dict[str, float]:
+    players = frame.get("players", [])
+    if not players:
+        return anchor
+    nearest = min(players, key=lambda p: pitch_distance(p["position"], anchor))
+    if pitch_distance(nearest["position"], anchor) > max_player_distance:
+        return anchor
+    return lerp_position(anchor, nearest["position"], 0.35)
+
+
 def interpolate_ball_positions(frames: list[dict[str, Any]], limit: int = BALL_INTERPOLATION_LIMIT) -> list[dict[str, Any]]:
     """Fill short gaps in ball detections, matching the cleaner offline demo behavior."""
     known = [(i, frame.get("ballPosition")) for i, frame in enumerate(frames) if frame.get("ballPosition")]
     if len(known) < 2:
-        return frames
+        return coast_ball_positions(frames)
 
     for (start_idx, start_pos), (end_idx, end_pos) in zip(known, known[1:]):
         if start_pos is None or end_pos is None:
@@ -770,6 +788,31 @@ def interpolate_ball_positions(frames: list[dict[str, Any]], limit: int = BALL_I
             if start_pitch and end_pitch:
                 frames[start_idx + offset]["pitchBall"] = lerp_position(start_pitch, end_pitch, alpha)
             frames[start_idx + offset]["ballInterpolated"] = True
+
+    return coast_ball_positions(frames)
+
+
+def coast_ball_positions(frames: list[dict[str, Any]], limit: int = BALL_COAST_LIMIT) -> list[dict[str, Any]]:
+    known = [(i, frame.get("ballPosition")) for i, frame in enumerate(frames) if frame.get("ballPosition")]
+    if not known:
+        return frames
+
+    for idx, frame in enumerate(frames):
+        if frame.get("ballPosition") or frame.get("isPitchView") is False:
+            continue
+
+        nearest_idx, nearest_pos = min(
+            known,
+            key=lambda item: abs(item[0] - idx),
+        )
+        if nearest_pos is None or abs(nearest_idx - idx) > limit:
+            continue
+
+        frame["ballPosition"] = ball_anchor_from_players(frame, nearest_pos)
+        nearest_pitch = frames[nearest_idx].get("pitchBall")
+        if nearest_pitch:
+            frame["pitchBall"] = nearest_pitch
+        frame["ballCoasted"] = True
 
     return frames
 
