@@ -13,6 +13,7 @@ import type {
 import {
   distanceMeters,
   estimateShotXg,
+  countPossessionPasses,
   isStablePlayerId,
   isVerifiedEvent,
   shotLikeEvents,
@@ -208,9 +209,9 @@ function buildTeamAnalysis(
 ): TeamAnalysis {
   const teamEvents = allEvents.filter((e) => e.team === id);
 
-  // Player IDs are assigned per frame by the vision model, so possession changes
-  // across frames are not stable enough to infer passes reliably.
-  const passCount = countEventType(teamEvents, "pass");
+  const passStats = countPossessionPasses(frames)[id];
+  const passEventCount = countEventType(teamEvents, "pass");
+  const passCount = Math.max(passEventCount, passStats.completed);
   const shotEvents = shotLikeEvents(teamEvents);
   const shotCount = shotEvents.length;
   const possessionSampleFrames = frames.filter((f) => f.possession === "home" || f.possession === "away");
@@ -230,13 +231,8 @@ function buildTeamAnalysis(
     ? positions.reduce((s, p) => s + p.y, 0) / positions.length
     : 50;
 
-  // Pass accuracy: 0 when no passes, scales with volume since we only detect
-  // visually successful passes from frames
-  const completedPasses = passCount;
-  const turnoverLike = countEventType(teamEvents, "tackle") + countEventType(teamEvents, "dribble");
-  const passAccuracy = completedPasses === 0
-    ? 0
-    : Math.round((completedPasses / Math.max(completedPasses + turnoverLike * 0.35, completedPasses)) * 100);
+  const passAttempts = Math.max(passCount + passStats.lost, passCount);
+  const passAccuracy = passAttempts === 0 ? 0 : Math.round((passCount / passAttempts) * 100);
   const trackingCoverage = stableTrackingCoverage(frames, id);
   const expectedGoals = teamExpectedGoals(allEvents, id);
   const verifiedEventShare = teamEvents.length
