@@ -66,17 +66,11 @@ export function stableTrackingCoverage(frames: FrameData[], team?: TeamId) {
   return players.filter((player) => isStablePlayerId(player.id) && player.number > 0).length / players.length;
 }
 
-function frameBallPosition(frame: FrameData): Position | null {
-  if (!frame.ballPosition) return null;
-  return fieldPosition(frame.ballPosition, frame.pitchBall, frame.pitchView);
-}
-
 // Count passes from the per-frame possession chain instead of the throttled
 // `pass` event timeline (which de-duplicates to ~1 per 4-5s and badly undercounts).
 // A completed pass = the ball moving to a different teammate; a loss = possession
-// handed to the other team after meaningful ball movement. Same-team ball
-// progression fills in passes that the tracker misses because the same holder ID
-// stayed attached to the ball. Best run over dense (15fps) frames.
+// handed to the other team. Pass accuracy = completed / (completed + lost), which
+// naturally tracks possession dominance. Best run over dense (5fps) frames.
 export function countPossessionPasses(
   frames: FrameData[]
 ): Record<TeamId, { completed: number; lost: number }> {
@@ -93,30 +87,9 @@ export function countPossessionPasses(
   let confirmed: { team: TeamId; playerId: string } | null = null;
   let pending: { team: TeamId; playerId: string } | null = null;
   let pendingCount = 0;
-  let previousBall: Position | null = null;
-  let previousTeam: TeamId | null = null;
-  let teamBallTravel = 0;
-  let lastProgressionPassAt = -Infinity;
 
   for (const frame of sorted) {
-    const ball = frameBallPosition(frame);
     const p = frame.possessingPlayer;
-    const currentTeam = frame.possession === "home" || frame.possession === "away" ? frame.possession : null;
-    if (ball && previousBall && currentTeam && previousTeam === currentTeam) {
-      const step = Math.hypot(ball.x - previousBall.x, ball.y - previousBall.y);
-      if (step >= 0.8 && step <= 28) teamBallTravel += step;
-      if (teamBallTravel >= 22 && frame.timestamp - lastProgressionPassAt >= 1.1) {
-        result[currentTeam].completed += 1;
-        lastProgressionPassAt = frame.timestamp;
-        teamBallTravel = 0;
-      }
-    } else if (currentTeam !== previousTeam) {
-      teamBallTravel = 0;
-    }
-
-    if (ball) previousBall = ball;
-    if (currentTeam) previousTeam = currentTeam;
-
     if (!p || frame.possession === "contested") continue; // hold last state through contested blips
     const holder = { team: p.team, playerId: p.playerId };
     if (confirmed && keyOf(holder) === keyOf(confirmed)) {
@@ -132,12 +105,9 @@ export function countPossessionPasses(
     if (pendingCount >= minHold) {
       if (confirmed) {
         if (confirmed.team === holder.team && confirmed.playerId !== holder.playerId) {
-          if (frame.timestamp - lastProgressionPassAt >= 1.1) result[holder.team].completed += 1;
-          teamBallTravel = 0;
-          lastProgressionPassAt = frame.timestamp;
+          result[holder.team].completed += 1;
         } else if (confirmed.team !== holder.team) {
           result[confirmed.team].lost += 1;
-          teamBallTravel = 0;
         }
       }
       confirmed = holder;
