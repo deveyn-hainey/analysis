@@ -9,6 +9,10 @@ const EVENT_REVIEW_MAX_ATTEMPTS = 3;
 const MAX_CANDIDATE_WINDOWS = 40;
 const DRIBBLE_DISTANCE_THRESHOLD = 6;
 const PASS_DISTANCE_THRESHOLD = 16;
+const GOAL_MOUTH_Y_MIN = 38;
+const GOAL_MOUTH_Y_MAX = 62;
+const BOX_Y_MIN = 24;
+const BOX_Y_MAX = 76;
 
 interface RawEvent {
   frameIndex: number;
@@ -388,6 +392,26 @@ function fieldPlayerPosition(player: FrameData["players"][number], frame: FrameD
   return fieldPosition(player.position, player.pitchPosition, frame.pitchView);
 }
 
+function goalSideForBall(ball: { x: number; y: number }): "left" | "right" | null {
+  if (ball.x <= 18 && ball.y >= BOX_Y_MIN && ball.y <= BOX_Y_MAX) return "left";
+  if (ball.x >= 82 && ball.y >= BOX_Y_MIN && ball.y <= BOX_Y_MAX) return "right";
+  return null;
+}
+
+function isGoalMouth(ball: { x: number; y: number }) {
+  return (ball.x <= 4 || ball.x >= 96) && ball.y >= GOAL_MOUTH_Y_MIN && ball.y <= GOAL_MOUTH_Y_MAX;
+}
+
+function isSixYardChannel(ball: { x: number; y: number }) {
+  return (ball.x <= 12 || ball.x >= 88) && ball.y >= 34 && ball.y <= 66;
+}
+
+function movingTowardGoal(prevBall: { x: number; y: number }, ball: { x: number; y: number }) {
+  const side = goalSideForBall(ball);
+  if (!side) return false;
+  return side === "left" ? ball.x < prevBall.x - 1.5 : ball.x > prevBall.x + 1.5;
+}
+
 function nearestPlayers(frame: FrameData, count = 4) {
   const ball = fieldBallPosition(frame);
   if (!ball) return [];
@@ -426,6 +450,9 @@ function candidateWindows(frames: FrameData[]) {
     };
 
     if (ball) {
+      const prevBall = prev ? fieldBallPosition(prev) : undefined;
+      const nextBall = next ? fieldBallPosition(next) : undefined;
+      const side = goalSideForBall(ball);
       // Goal-mouth width only — without a y-bound this fired for every ordinary
       // byline touch (including corners), eating most of the candidate budget
       // with "possible goal" noise instead of routine play.
@@ -435,6 +462,45 @@ function candidateWindows(frames: FrameData[]) {
       const nearestOpponent = nearest.find((player) =>
         nearest[0] && player.team !== nearest[0].team
       );
+      const likelyShotTowardGoal = Boolean(prevBall && movingTowardGoal(prevBall, ball));
+      const disappearsAfterDanger = isSixYardChannel(ball) && !nextBall;
+
+      if (isGoalMouth(ball)) {
+        candidates.push({
+          candidate_type: "possible_goal_line_or_save",
+          frameIndex: frame.frameIndex,
+          window: {
+            start_timestamp: Math.max(0, frames[Math.max(0, i - 2)]?.timestamp ?? window.start_timestamp),
+            end_timestamp: frames[Math.min(frames.length - 1, i + 2)]?.timestamp ?? window.end_timestamp,
+          },
+          signals: {
+            ball_in_goal_mouth: { detected: true, side: ball.x <= 4 ? "left" : "right", position: ball },
+            ball_moving_toward_goal: likelyShotTowardGoal,
+            possession_team: frame.possession,
+            nearest_players: nearest,
+            instruction:
+              "High-priority goal review: inspect whether the ball fully crossed the goal line, hit the net, was saved by the keeper, or stayed in play. Report goal only with visible crossing/net/restart/celebration evidence; otherwise report shot/save.",
+          },
+        });
+      } else if ((isSixYardChannel(ball) && likelyShotTowardGoal) || disappearsAfterDanger) {
+        candidates.push({
+          candidate_type: "possible_goal_line_sequence",
+          frameIndex: frame.frameIndex,
+          window: {
+            start_timestamp: Math.max(0, frames[Math.max(0, i - 2)]?.timestamp ?? window.start_timestamp),
+            end_timestamp: frames[Math.min(frames.length - 1, i + 3)]?.timestamp ?? window.end_timestamp,
+          },
+          signals: {
+            ball_in_six_yard_or_goal_channel: { detected: true, side, position: ball },
+            ball_moving_toward_goal: likelyShotTowardGoal,
+            ball_missing_next_frame_after_danger: disappearsAfterDanger,
+            possession_team: frame.possession,
+            nearest_players: nearest,
+            instruction:
+              "High-priority goal recall trigger: the ball is in the goal channel and may cross/disappear. Check image sequence for net contact, keeper retrieval, goal-line crossing, immediate celebration, scoreboard change, or restart.",
+          },
+        });
+      }
 
       if (inGoalZone) {
         candidates.push({
@@ -472,9 +538,6 @@ function candidateWindows(frames: FrameData[]) {
           },
         });
       }
-
-      const prevBall = prev ? fieldBallPosition(prev) : undefined;
-      const nextBall = next ? fieldBallPosition(next) : undefined;
 
       if (prevBall && nextBall) {
         const v1 = {
@@ -611,6 +674,11 @@ function candidateWindows(frames: FrameData[]) {
         ? Math.hypot(centroid.x - prevCentroid.x, centroid.y - prevCentroid.y)
         : 0;
       if (playerCountDelta >= 6 || centroidJump >= 35) {
+        const prevBall = fieldBallPosition(prev);
+        const currentBall = fieldBallPosition(frame);
+        const recentDanger =
+          Boolean(prevBall && goalSideForBall(prevBall)) ||
+          Boolean(currentBall && goalSideForBall(currentBall));
         candidates.push({
           candidate_type: "possible_camera_cut_replay_or_goal_aftermath",
           frameIndex: frame.frameIndex,
@@ -619,14 +687,29 @@ function candidateWindows(frames: FrameData[]) {
             camera_cut_or_replay_angle_possible: true,
             player_count_delta: playerCountDelta,
             centroid_jump: +centroidJump.toFixed(1),
-            instruction: "Check for replay/angle change before counting a new event.",
+            recent_high_danger_ball_position: recentDanger,
+            instruction: recentDanger
+              ? "Camera changed immediately after danger near goal. Check for goal aftermath: ball in net, keeper retrieving ball, scoreboard/restart, or celebrations."
+              : "Check for replay/angle change before counting a new event.",
           },
         });
       }
     }
   }
 
-  return candidates.slice(0, MAX_CANDIDATE_WINDOWS);
+  const priority: Record<string, number> = {
+    possible_goal_line_or_save: 0,
+    possible_goal_line_sequence: 1,
+    possible_goal_celebration_cluster: 2,
+    possible_goal_or_save: 3,
+    possible_camera_cut_replay_or_goal_aftermath: 4,
+    possible_shot_save_or_deflection: 5,
+    possible_shot: 6,
+  };
+
+  return candidates
+    .sort((a, b) => (priority[a.candidate_type] ?? 20) - (priority[b.candidate_type] ?? 20))
+    .slice(0, MAX_CANDIDATE_WINDOWS);
 }
 
 type CandidateWindow = ReturnType<typeof candidateWindows>[number];
@@ -640,16 +723,23 @@ function fallbackEventForCandidate(
     : undefined;
   const ball = fieldBallPosition(frame);
 
-  if (candidate.candidate_type === "possible_goal_or_save") {
+  if (
+    candidate.candidate_type === "possible_goal_or_save" ||
+    candidate.candidate_type === "possible_goal_line_or_save" ||
+    candidate.candidate_type === "possible_goal_line_sequence"
+  ) {
     return {
       frameIndex: frame.frameIndex,
       timestamp: frame.timestamp,
       type: "shot",
       team,
-      description: "Unverified shot/save candidate from YOLO ball location near the goal zone",
-      confidence: 0.38,
+      description:
+        candidate.candidate_type === "possible_goal_or_save"
+          ? "Unverified shot/save candidate from YOLO ball location near the goal zone"
+          : "Unverified high-danger goal-line candidate from ball location/trajectory",
+      confidence: candidate.candidate_type === "possible_goal_or_save" ? 0.38 : 0.48,
       position: ball,
-      evidence_used: ["YOLO placed the ball in the goal zone", "Claude event review was unavailable for this window"],
+      evidence_used: ["YOLO placed the ball in or near the goal channel", "Claude event review was unavailable for this window"],
       conflicts: ["not confirmed by Claude vision review"],
       pipeline_flag: "low_confidence",
     };
@@ -876,6 +966,7 @@ Routine event rules:
 
 Goal rules:
 - Do NOT confirm a goal from one weak signal.
+- Treat "possible_goal_line_or_save" and "possible_goal_line_sequence" as HIGH PRIORITY. Zoom your attention to the goalmouth/net/keeper on those frames and adjacent supplied frames.
 - Strong confirmation: visible ball in net, keeper retrieving from net, or obvious non-half-boundary kickoff aftermath, all within this batch's own images.
 - Do NOT emit a goal event yourself just because this frame's scoreboard shows a goal already happened — you only see this batch, not the whole clip, so you can't tell if that score is new or was already there before this batch started. Just report it accurately in the "scoreboard" field above; an increase is detected automatically by comparing your readings across the whole clip, including frames outside this batch.
 - Supporting signals: ball in goal zone, ball disappears in goalmouth, celebration cluster near goal, defending shape collapse.
