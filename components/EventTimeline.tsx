@@ -136,7 +136,7 @@ export default function EventTimeline({
   }
 
   return (
-    <div className="relative h-full max-h-[760px] overflow-y-auto pr-1">
+    <div className="relative h-full overflow-y-auto pr-1">
       {groups.map((group) => {
         const isOpen = openGroups.has(group.key) || group.key === selectedGroupKey;
         return (

@@ -1,8 +1,9 @@
 let _objectUrl: string | null = null;
 
 export const videoStore = {
-  set(url: string) {
-    if (_objectUrl) URL.revokeObjectURL(_objectUrl);
+  // Sets the active video URL without revoking the previous one — the match
+  // library owns URLs across multiple entries and revokes them on removal.
+  set(url: string | null) {
     _objectUrl = url;
   },
   get(): string | null {

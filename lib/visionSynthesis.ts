@@ -27,6 +27,7 @@ export interface SynthesisKeyFrame {
 
 export interface VisionSynthesisResult {
   outcome: Omit<OutcomeProjection, "source"> | null;
+  summary: string;
   insights: CoachingInsight[];
   // Per-shot xG keyed by rounded timestamp (seconds, 1 decimal) so the summarize
   // route can merge it onto the matching shot/goal/save event.
@@ -45,6 +46,7 @@ You are given (1) computed metrics for both teams and (2) a curated set of still
 
 Return ONLY a single valid JSON object — no markdown, no code fences — with this exact shape:
 {
+  "summary": "<2-3 sentence plain-English narrative of what actually happens in THIS clip — who controls play, the key chances/events, and how it's trending. Describe the clip, not a full match.>",
   "outcome": {
     "homeWin": <int 0-100>,
     "draw": <int 0-100>,
@@ -109,6 +111,7 @@ ${conflicts}`;
 }
 
 interface RawSynthesis {
+  summary?: string;
   outcome?: { homeWin?: number; draw?: number; awayWin?: number; reasoning?: string };
   insights?: Array<Partial<CoachingInsight>>;
   shotXg?: Array<{ timestamp?: number; xg?: number }>;
@@ -181,6 +184,7 @@ export async function runVisionSynthesis(
 
   return {
     outcome: normalizeOutcome(parsed.outcome),
+    summary: (parsed.summary ?? "").trim(),
     insights,
     shotXg,
     usedVision: keyFrames.length > 0,

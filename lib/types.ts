@@ -169,6 +169,8 @@ export interface MatchAnalysis {
   analysisWarnings?: string[];
   insights: CoachingInsight[];
   outcome?: OutcomeProjection;
+  // 2-3 sentence vision-grounded narrative of what happened in the uploaded clip.
+  clipSummary?: string;
   // `score` is the full-match scoreboard reading at the end of the clip (may carry
   // goals scored before the upload). `clipGoals` is only the goals scored within
   // the uploaded clip (scoreboard delta) — use this for finishing/conversion so

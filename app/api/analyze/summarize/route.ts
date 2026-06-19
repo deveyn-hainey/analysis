@@ -414,7 +414,27 @@ function buildFallbackOutcome(homeTeam: TeamAnalysis, awayTeam: TeamAnalysis): O
 interface SynthesisOutput {
   insights: CoachingInsight[];
   outcome: OutcomeProjection;
+  summary: string;
   shotXg: Map<string, number>;
+}
+
+// Drop near-duplicate insights (same title, or same category targeting the same
+// team with near-identical observations) so the list doesn't repeat the same
+// point. Keeps the first occurrence.
+function dedupeInsights(insights: CoachingInsight[]): CoachingInsight[] {
+  const seenTitles = new Set<string>();
+  const seenKeys = new Set<string>();
+  const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
+  const result: CoachingInsight[] = [];
+  for (const insight of insights) {
+    const title = norm(insight.title);
+    const key = `${insight.category}|${insight.affectedTeam}|${norm(insight.observation).slice(0, 60)}`;
+    if (seenTitles.has(title) || seenKeys.has(key)) continue;
+    seenTitles.add(title);
+    seenKeys.add(key);
+    result.push(insight);
+  }
+  return result;
 }
 
 // Runs the single vision-grounded synthesis call (Opus 4.8, multi-image) and
@@ -438,20 +458,22 @@ async function generateSynthesis(
       keyFrames,
     });
 
-    const insights =
+    const insights = dedupeInsights(
       result.insights.length > 0
         ? result.insights.map((insight) => enrichInsightEvidence(insight, homeTeam, awayTeam, "claude"))
-        : buildFallbackInsights(homeTeam, awayTeam);
+        : buildFallbackInsights(homeTeam, awayTeam)
+    );
 
     const outcome: OutcomeProjection = result.outcome
       ? { ...result.outcome, source: "vision" }
       : buildFallbackOutcome(homeTeam, awayTeam);
 
-    return { insights, outcome, shotXg: result.shotXg };
+    return { insights, outcome, summary: result.summary, shotXg: result.shotXg };
   } catch {
     return {
-      insights: buildFallbackInsights(homeTeam, awayTeam),
+      insights: dedupeInsights(buildFallbackInsights(homeTeam, awayTeam)),
       outcome: buildFallbackOutcome(homeTeam, awayTeam),
+      summary: "",
       shotXg: new Map(),
     };
   }
@@ -535,6 +557,7 @@ export async function POST(req: NextRequest) {
       ],
       insights: synthesis.insights,
       outcome: synthesis.outcome,
+      clipSummary: synthesis.summary || undefined,
       score: {
         home: scoreboardScore?.home ?? countEventType(keyEvents, "goal", "home"),
         away: scoreboardScore?.away ?? countEventType(keyEvents, "goal", "away"),

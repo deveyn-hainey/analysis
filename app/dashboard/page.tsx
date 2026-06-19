@@ -1,11 +1,12 @@
 "use client";
 
 import { useEffect, useState, useRef, useMemo, Suspense } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useRouter } from "next/navigation";
 import {
   Activity,
   Film,
   ChevronLeft,
+  ChevronDown,
   Download,
   Cpu,
   AlertTriangle,
@@ -19,9 +20,9 @@ import StatsChart from "@/components/StatsChart";
 import TeamComparison from "@/components/TeamComparison";
 import CoachingInsights from "@/components/CoachingInsights";
 import Heatmap from "@/components/Heatmap";
-import { videoStore } from "@/lib/videoStore";
 import { frameImageStore } from "@/lib/frameImageStore";
 import { denseFrameStore } from "@/lib/denseFrameStore";
+import { matchLibrary } from "@/lib/matchLibrary";
 import { buildPassNetwork, countPossessionPasses, estimateShotXg, teamExpectedGoals } from "@/lib/visionMetrics";
 
 const PANEL = "rounded-lg border border-[#1c3020] bg-[#0b130d] shadow-[0_0_40px_rgba(74,222,128,0.03)]";
@@ -46,6 +47,26 @@ function estimateXg(stats: MatchAnalysis["homeTeam"]["stats"]) {
   if (typeof stats.expectedGoals === "number") return stats.expectedGoals;
   const value = stats.shots * 0.09 + stats.shotsOnTarget * 0.18 + stats.goals * 0.32 + stats.corners * 0.04;
   return Math.max(stats.goals * 0.65, value);
+}
+
+// For the events timeline only: when several events land in the same second
+// (e.g. a regain + carry + speculative shot read off one moment), show just the
+// single most trustworthy one — a goal always wins, otherwise highest confidence.
+// keyEvents stays untouched so team stats/counts are unaffected.
+function collapseConcurrentEvents(events: MatchEvent[]): MatchEvent[] {
+  const groups = new Map<number, MatchEvent[]>();
+  for (const event of events) {
+    const bucket = Math.floor(event.timestamp);
+    const list = groups.get(bucket);
+    if (list) list.push(event);
+    else groups.set(bucket, [event]);
+  }
+  const pickBest = (group: MatchEvent[]) => {
+    const goals = group.filter((e) => e.type === "goal");
+    const pool = goals.length ? goals : group;
+    return pool.reduce((best, e) => (e.confidence > best.confidence ? e : best));
+  };
+  return [...groups.values()].map(pickBest).sort((a, b) => a.timestamp - b.timestamp);
 }
 
 function bestScoreboardLabel(frames: FrameData[], side: "home" | "away") {
@@ -357,7 +378,6 @@ function SystemHeader({
               <span className="px-6 text-[#5f7567]">-</span>
               <span>{analysis.score.away}</span>
             </div>
-            <div className="mt-3 text-sm text-[#829086]">Final visible scoreboard in uploaded video</div>
           </div>
 
           <div className="flex items-center justify-end gap-4">
@@ -437,7 +457,8 @@ function SummaryPanel({ analysis }: { analysis: MatchAnalysis }) {
             Uploaded clip ends {scoreLabel}.
           </h1>
           <p className="mt-5 max-w-4xl text-base leading-8 text-[#aeb8b0]">
-            The model tracked possession, shot creation, event timing, and player movement inside this uploaded video segment. The outcome profile below describes this clip window only, not a full-match forecast.
+            {analysis.clipSummary?.trim() ||
+              "The model tracked possession, shot creation, event timing, and player movement inside this uploaded video segment. The outcome profile below describes this clip window only, not a full-match forecast."}
           </p>
 
           <div className="mt-7 grid md:grid-cols-2 gap-3">
@@ -801,25 +822,45 @@ function PipelinePanel({ denseStatus, denseFrames }: { denseStatus: string; dens
 
 function DashboardContent() {
   const router = useRouter();
-  const searchParams = useSearchParams();
   const [analysis, setAnalysis] = useState<MatchAnalysis | null>(null);
   const [selectedFrame, setSelectedFrame] = useState<FrameData | null>(null);
   const [selectedEventId, setSelectedEventId] = useState<string | undefined>(undefined);
   // Smoothly interpolated frame — updated at ~30fps via RAF for fluid overlay motion
   const [liveFrame, setLiveFrame] = useState<FrameData | null>(null);
   const [activeHeatmapTeam, setActiveHeatmapTeam] = useState<"home" | "away">("home");
+  const [showReviewFlags, setShowReviewFlags] = useState(false);
   const [pitchView, setPitchView] = useState<"frame" | "tactical">("tactical");
-  const [fieldOrientation, setFieldOrientation] = useState<FieldOrientation>("broadcast");
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [denseFrames, setDenseFrames] = useState<import("@/lib/types").FrameData[]>([]);
   const [denseStatus, setDenseStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const videoRef = useRef<HTMLVideoElement>(null);
   const liveFrameRef = useRef<FrameData | null>(null);
+  const loadedIdRef = useRef<string | null>(null);
 
+  // Load the active match from the in-session library, and re-sync when the user
+  // switches matches. Analysis/video/frames reset only on an actual match change
+  // (tracked via loadedIdRef) so background dense-tracking updates don't reset playback.
   useEffect(() => {
-    const url = videoStore.get();
-    setVideoUrl(url);
-  }, []);
+    const sync = () => {
+      const entry = matchLibrary.active();
+      if (!entry) {
+        router.push("/");
+        return;
+      }
+      if (loadedIdRef.current !== entry.id) {
+        loadedIdRef.current = entry.id;
+        const data = withScoreboardTeamNames(entry.analysis);
+        setAnalysis(data);
+        setVideoUrl(entry.videoUrl);
+        if (data.frames.length > 0) {
+          setSelectedFrame(data.frames[0]);
+          setLiveFrame(data.frames[0]);
+        }
+      }
+    };
+    sync();
+    return matchLibrary.subscribe(sync);
+  }, [router]);
 
   useEffect(() => {
     liveFrameRef.current = liveFrame;
@@ -840,7 +881,9 @@ function DashboardContent() {
   // to reduce detector jitter. Sparse analysis frames use the same interpolation fallback.
   useEffect(() => {
     const video = videoRef.current;
-    if (!video || !analysis || !videoUrl) return;
+    // Only drive playback-synced frames in the tactical/video view. In Frame view
+    // the user picks frames manually, so the RAF loop must not overwrite selection.
+    if (!video || !analysis || !videoUrl || pitchView !== "tactical") return;
 
     const sparseSorted = [...analysis.frames].sort((a, b) => a.timestamp - b.timestamp);
     let rafId: number;
@@ -886,25 +929,7 @@ function DashboardContent() {
 
     rafId = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(rafId);
-  }, [analysis, videoUrl, denseFrames]);
-
-  useEffect(() => {
-    const stored = sessionStorage.getItem("matchAnalysis");
-    if (stored) {
-      try {
-        const data = withScoreboardTeamNames(JSON.parse(stored) as MatchAnalysis);
-        setAnalysis(data);
-        if (data.frames.length > 0) {
-          setSelectedFrame(data.frames[0]);
-          setLiveFrame(data.frames[0]);
-        }
-      } catch {
-        router.push("/");
-      }
-    } else {
-      router.push("/");
-    }
-  }, [router, searchParams]);
+  }, [analysis, videoUrl, denseFrames, pitchView]);
 
   // Count passes from the possession chain over the densest frames available,
   // rather than the throttled `pass` event timeline (which undercounts badly).
@@ -926,7 +951,7 @@ function DashboardContent() {
 
   const currentFrame = renderableFrame(selectedFrame ?? analysis.frames[0]);
   const displayFrame = renderableFrame(liveFrame ?? currentFrame);
-  const fieldFrame = orientFrameForField(displayFrame, fieldOrientation);
+  const fieldFrame = orientFrameForField(displayFrame, "broadcast");
 
   // Override the throttled-event pass count / accuracy with the possession-chain
   // tally so the displayed passes reflect every detected pass and accuracy tracks
@@ -947,7 +972,7 @@ function DashboardContent() {
   const displayAway = withPossessionPasses(analysis.awayTeam);
   const displayAnalysis = { ...analysis, homeTeam: displayHome, awayTeam: displayAway };
   const passNetworkFrames = (denseFrames.length ? denseFrames : analysis.frames).map((frame) =>
-    orientFrameForField(frame, fieldOrientation)
+    orientFrameForField(frame, "broadcast")
   );
   const frameImage = currentFrame ? frameImageStore.get(currentFrame.frameIndex) : null;
 
@@ -1082,25 +1107,9 @@ function DashboardContent() {
           <div className={EYEBROW}>tactical frame</div>
           <h2 className="mt-3 text-xl font-black text-[#f0fdf4]">Current Shape</h2>
         </div>
-        <div className="flex items-center gap-2">
-          <div className="flex rounded-lg border border-[#1c3020] overflow-hidden text-xs">
-            <button
-              onClick={() => setFieldOrientation("broadcast")}
-              className={`px-3 py-1.5 transition-colors ${fieldOrientation === "broadcast" ? "bg-green-400 text-black font-medium" : "text-[#6b9e6b] hover:text-[#f0fdf4]"}`}
-            >
-              Normal
-            </button>
-            <button
-              onClick={() => setFieldOrientation("mirrored")}
-              className={`px-3 py-1.5 transition-colors ${fieldOrientation === "mirrored" ? "bg-green-400 text-black font-medium" : "text-[#6b9e6b] hover:text-[#f0fdf4]"}`}
-            >
-              Mirror
-            </button>
-          </div>
-          <span className="rounded-lg border border-[#1c3020] px-3 py-1.5 text-xs font-mono text-[#829086]">
-            {formatDuration(displayFrame.timestamp)}
-          </span>
-        </div>
+        <span className="rounded-lg border border-[#1c3020] px-3 py-1.5 text-xs font-mono text-[#829086]">
+          {formatDuration(displayFrame.timestamp)}
+        </span>
       </div>
       <div className="mt-6 mx-auto max-w-4xl">
         <SoccerField frame={fieldFrame} />
@@ -1163,9 +1172,26 @@ function DashboardContent() {
           </div>
 
           <div className="flex items-center gap-3">
-            <span className="rounded-lg border border-[#1c3020] px-3 py-1.5 text-xs font-medium text-[#6b9e6b]">
-              Insights
-            </span>
+            {matchLibrary.list().length > 1 ? (
+              <div className="flex items-center gap-1 rounded-lg border border-[#1c3020] p-1">
+                {matchLibrary.list().map((m) => (
+                  <button
+                    key={m.id}
+                    onClick={() => matchLibrary.setActive(m.id)}
+                    title={m.title}
+                    className={`max-w-[140px] truncate rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
+                      matchLibrary.activeId() === m.id ? "bg-green-400 text-black" : "text-[#6b9e6b] hover:text-[#f0fdf4]"
+                    }`}
+                  >
+                    {m.title}
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <span className="rounded-lg border border-[#1c3020] px-3 py-1.5 text-xs font-medium text-[#6b9e6b]">
+                Insights
+              </span>
+            )}
 
             {analysis.processingMethod === "demo" && (
               <span className="text-xs bg-yellow-400/10 text-yellow-400 px-2 py-1 rounded-full border border-yellow-400/20">
@@ -1193,15 +1219,26 @@ function DashboardContent() {
         <SystemHeader analysis={analysis} denseStatus={denseStatus} denseFrames={denseFrames} onExport={exportJson} />
 
         {((analysis.analysisWarnings?.length ?? 0) > 0 || (analysis.eventConflicts?.length ?? 0) > 0) && (
-          <div className="border border-amber-400/25 bg-amber-400/10 rounded-lg p-3 flex items-start gap-3">
-            <AlertTriangle className="w-4 h-4 text-amber-300 mt-0.5 flex-shrink-0" />
-            <div className="text-xs text-amber-100/90 leading-relaxed">
-              <div className="font-semibold text-amber-200">Review flags</div>
-              <div>{(analysis.eventConflicts?.length ?? 0)} event conflict(s).</div>
-              {analysis.analysisWarnings?.map((warning, i) => (
-                <div key={i}>{warning}</div>
-              ))}
-            </div>
+          <div className="border border-amber-400/25 bg-amber-400/10 rounded-lg">
+            <button
+              onClick={() => setShowReviewFlags((v) => !v)}
+              className="flex w-full items-center gap-3 p-3 text-left"
+            >
+              <AlertTriangle className="w-4 h-4 text-amber-300 flex-shrink-0" />
+              <span className="flex-1 text-xs font-semibold text-amber-200">
+                Review flags · {(analysis.eventConflicts?.length ?? 0)} event conflict(s)
+                {(analysis.analysisWarnings?.length ?? 0) > 0 ? `, ${analysis.analysisWarnings?.length} note(s)` : ""}
+              </span>
+              <ChevronDown className={`w-4 h-4 text-amber-300 transition-transform ${showReviewFlags ? "rotate-180" : ""}`} />
+            </button>
+            {showReviewFlags && (
+              <div className="space-y-1 px-3 pb-3 pl-10 text-xs leading-relaxed text-amber-100/90">
+                <div>{(analysis.eventConflicts?.length ?? 0)} event conflict(s).</div>
+                {analysis.analysisWarnings?.map((warning, i) => (
+                  <div key={i}>{warning}</div>
+                ))}
+              </div>
+            )}
           </div>
         )}
 
@@ -1211,13 +1248,13 @@ function DashboardContent() {
 
             <div className="grid lg:grid-cols-12 gap-4">
               <div className="lg:col-span-8">{trackingPanel}</div>
-              <div className="lg:col-span-4">
-                <div className={`${PANEL} p-5 max-h-[560px] overflow-hidden`}>
+              <div className="lg:col-span-4 relative">
+                <div className={`${PANEL} p-5 flex flex-col lg:absolute lg:inset-0`}>
                   <div className={EYEBROW}>match events</div>
                   <h2 className="mt-2 text-xl font-black text-[#f0fdf4]">Auto-extracted from video</h2>
-                  <div className="mt-5 max-h-[460px] overflow-y-auto pr-1">
+                  <div className="mt-5 flex-1 min-h-0">
                     <EventTimeline
-                      events={analysis.keyEvents}
+                      events={collapseConcurrentEvents(analysis.keyEvents)}
                       selectedEventId={selectedEventId}
                       selectedTimestamp={selectedFrame?.timestamp}
                       onSelect={seekToEvent}

@@ -16,8 +16,7 @@ import {
 } from "lucide-react";
 import type { AnalyzeEventsRequest, AnalyzeFrameRequest, FrameData, MatchAnalysis, MatchEvent } from "@/lib/types";
 import { videoStore } from "@/lib/videoStore";
-import { frameImageStore } from "@/lib/frameImageStore";
-import { denseFrameStore } from "@/lib/denseFrameStore";
+import { matchLibrary, type MatchEntry } from "@/lib/matchLibrary";
 
 const ACCEPTED_TYPES = ["video/mp4", "video/webm", "video/ogg", "video/quicktime"];
 const FRAME_ANALYSIS_CONCURRENCY = 4;
@@ -328,7 +327,7 @@ const KEY_FRAME_TARGET = 12;
 // contains a key event, topped up with evenly-spaced frames so the model sees
 // build-up play and tactical shape, not just the moments around events. Frames
 // are downsized (640×360) to keep the multi-image payload small.
-async function selectKeyFrames(analyzed: FrameData[]): Promise<RawFrame[]> {
+async function selectKeyFrames(analyzed: FrameData[], frameImages: Map<number, string>): Promise<RawFrame[]> {
   if (analyzed.length === 0) return [];
 
   const chosen = new Map<number, number>(); // frameIndex -> timestamp
@@ -349,7 +348,7 @@ async function selectKeyFrames(analyzed: FrameData[]): Promise<RawFrame[]> {
     .sort((a, b) => a[1] - b[1])
     .slice(0, KEY_FRAME_TARGET)
     .map(([index, timestamp]) => {
-      const base64 = frameImageStore.get(index);
+      const base64 = frameImages.get(index);
       return base64 ? { base64, timestamp } : null;
     })
     .filter((x): x is RawFrame => x !== null);
@@ -422,9 +421,9 @@ async function reviewEventsWithClaude(
 // endpoint and stream the dense per-frame results into denseFrameStore. The user
 // is already on the dashboard by the time this resolves, and the RAF loop there
 // upgrades automatically once the store becomes "ready".
-async function fetchDenseTracking(file: File): Promise<void> {
+async function fetchDenseTracking(file: File, matchId: string): Promise<void> {
   if (!VISION_WORKER_URL) return;
-  denseFrameStore.setLoading();
+  matchLibrary.setDense(matchId, [], "loading");
   try {
     const form = new FormData();
     form.append("file", file);
@@ -434,18 +433,27 @@ async function fetchDenseTracking(file: File): Promise<void> {
       body: form,
     });
     if (!res.ok) {
-      denseFrameStore.setError();
+      matchLibrary.setDense(matchId, [], "error");
       return;
     }
     const data = (await res.json()) as { frames?: FrameData[] };
     if (!data.frames || data.frames.length === 0) {
-      denseFrameStore.setError();
+      matchLibrary.setDense(matchId, [], "error");
       return;
     }
-    denseFrameStore.setReady(data.frames);
+    matchLibrary.setDense(matchId, data.frames, "ready");
   } catch {
-    denseFrameStore.setError();
+    matchLibrary.setDense(matchId, [], "error");
   }
+}
+
+// Human-friendly label for the match switcher.
+function deriveMatchTitle(analysis: MatchAnalysis): string {
+  const home = analysis.homeTeam.name?.trim();
+  const away = analysis.awayTeam.name?.trim();
+  const generic = (n?: string) => !n || /^(home|away)( team)?$/i.test(n);
+  if (!generic(home) && !generic(away)) return `${home} vs ${away}`;
+  return "Untitled match";
 }
 
 export default function HomePage() {
@@ -478,9 +486,9 @@ export default function HomePage() {
           throw new Error("No frames could be extracted from this video. Please try a longer clip.");
         }
 
-        // Store images so the dashboard can render actual-frame overlays
-        frameImageStore.clear();
-        rawFrames.forEach((f, i) => frameImageStore.set(i, f.base64));
+        // Per-match frame images so the dashboard can render actual-frame overlays.
+        const frameImages = new Map<number, string>();
+        rawFrames.forEach((f, i) => frameImages.set(i, f.base64));
 
         setStatus("analyzing");
         setStatusDetail(
@@ -541,7 +549,7 @@ export default function HomePage() {
         setStatusDetail("Building match insights…");
         setProgress(88);
 
-        const keyFrames = await selectKeyFrames(analyzedFrames);
+        const keyFrames = await selectKeyFrames(analyzedFrames, frameImages);
 
         const sumRes = await fetch("/api/analyze/summarize", {
           method: "POST",
@@ -555,12 +563,26 @@ export default function HomePage() {
         }
 
         const analysis = (await sumRes.json()) as MatchAnalysis;
-        sessionStorage.setItem("matchAnalysis", JSON.stringify(analysis));
+
+        // Add to the in-session library (becomes the active match) instead of a
+        // single global slot, so prior analyses remain switchable.
+        const entry: MatchEntry = {
+          id: analysis.id,
+          title: deriveMatchTitle(analysis),
+          analysis,
+          videoUrl: videoStore.get(),
+          frameImages,
+          denseFrames: [],
+          denseStatus: VISION_WORKER_URL ? "loading" : "idle",
+          createdAt: Date.now(),
+        };
+        matchLibrary.add(entry);
+
         setProgress(100);
         setStatus("done");
         // Kick off dense per-frame tracking in the background — the dashboard
         // RAF loop will upgrade from sparse interpolation once it resolves.
-        if (VISION_WORKER_URL) fetchDenseTracking(file);
+        if (VISION_WORKER_URL) fetchDenseTracking(file, entry.id);
         router.push("/dashboard");
       } catch (err) {
         setErrorMsg(err instanceof Error ? err.message : "Something went wrong.");
@@ -571,7 +593,6 @@ export default function HomePage() {
   );
 
   const handleDemo = useCallback(async () => {
-    videoStore.clear();
     setStatus("analyzing");
     setProgress(10);
 
@@ -585,7 +606,16 @@ export default function HomePage() {
       setProgress(90);
       if (!res.ok) throw new Error("Failed to load demo");
       const analysis = (await res.json()) as MatchAnalysis;
-      sessionStorage.setItem("matchAnalysis", JSON.stringify(analysis));
+      matchLibrary.add({
+        id: analysis.id,
+        title: `${deriveMatchTitle(analysis)} (demo)`,
+        analysis,
+        videoUrl: null,
+        frameImages: new Map(),
+        denseFrames: [],
+        denseStatus: "idle",
+        createdAt: Date.now(),
+      });
       setProgress(100);
       setStatus("done");
       router.push("/dashboard");
