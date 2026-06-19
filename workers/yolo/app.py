@@ -48,9 +48,6 @@ CONFIDENCE = float(os.getenv("YOLO_CONFIDENCE", "0.25"))
 # A missed ball starves almost every downstream candidate/event signal, so it gets its
 # own, more permissive threshold instead of sharing the player confidence cutoff.
 BALL_CONFIDENCE = float(os.getenv("YOLO_BALL_CONFIDENCE", "0.1"))
-# Reject ball boxes that are implausibly large for broadcast tracking. This is a
-# fraction of full image area, so 0.003 is ~2,800 px on 1280x720 footage.
-BALL_MAX_AREA_FRAC = float(os.getenv("YOLO_BALL_MAX_AREA_FRAC", "0.003"))
 # Inference resolution for the ultralytics backend. 1280 matches soccana's training
 # imgsz; override down for speed on CPU if a frame is already small, or up for even
 # tinier balls on high-res source video.
@@ -67,10 +64,6 @@ AWAY_KIT_COLOR = os.getenv("YOLO_AWAY_KIT_COLOR", "").strip().lower()
 DEFAULT_DENSE_FPS = float(os.getenv("YOLO_DENSE_FPS", "15"))
 TRACK_SMOOTHING_ALPHA = float(os.getenv("YOLO_TRACK_SMOOTHING_ALPHA", "0.35"))
 BALL_INTERPOLATION_LIMIT = int(os.getenv("YOLO_BALL_INTERPOLATION_LIMIT", "30"))
-# Fill short leading/trailing ball gaps from the nearest reliable detection. This
-# helps the overlay stay continuous when the detector drops the tiny ball for a
-# few frames, without carrying it through long unknown sequences.
-BALL_COAST_LIMIT = int(os.getenv("YOLO_BALL_COAST_LIMIT", "12"))
 # Max consecutive frames a player can be missing before we stop coasting their
 # position. ~0.7s at 15fps — long enough to bridge occlusion blips, short enough
 # not to leave a ghost where a player has actually left the frame.
@@ -444,15 +437,6 @@ def foot_on_pitch(box: tuple[float, float, float, float], mask: np.ndarray) -> b
     return bool(mask[fy, fx])
 
 
-def point_on_pitch(position: dict[str, float], mask: np.ndarray) -> bool:
-    h, w = mask.shape[:2]
-    px = int((position["x"] / 100.0) * w)
-    py = int((position["y"] / 100.0) * h)
-    px = max(0, min(w - 1, px))
-    py = max(0, min(h - 1, py))
-    return bool(mask[py, px])
-
-
 def filter_persons_to_pitch(
     image: Image.Image,
     detections: list[Detection],
@@ -477,42 +461,6 @@ def filter_persons_to_pitch(
                 continue
         kept.append(d)
     return kept
-
-
-def choose_ball_detection(
-    ball_detections: list[Detection],
-    players: list[dict[str, Any]],
-    width: int,
-    height: int,
-    pitch_mask: Optional[np.ndarray],
-) -> Optional[Detection]:
-    if not ball_detections:
-        return None
-    if pitch_mask is None and REQUIRE_PITCH_VIEW:
-        return None
-
-    image_area = max(1, width * height)
-    candidates: list[tuple[float, Detection]] = []
-    for detection in ball_detections:
-        position = position_from_box(detection.xyxy, width, height)
-        area_frac = box_area(detection.xyxy) / image_area
-        if area_frac > BALL_MAX_AREA_FRAC:
-            continue
-        if pitch_mask is not None and not point_on_pitch(position, pitch_mask):
-            continue
-
-        nearest_player_distance = (
-            min(pitch_distance(position, player["position"]) for player in players)
-            if players
-            else 18.0
-        )
-        area_penalty = max(0.0, area_frac / max(BALL_MAX_AREA_FRAC, 0.0001) - 0.35)
-        score = detection.confidence * 2.0 - nearest_player_distance * 0.015 - area_penalty * 0.35
-        candidates.append((score, detection))
-
-    if not candidates:
-        return None
-    return max(candidates, key=lambda item: item[0])[1]
 
 
 def split_teams(features: list[np.ndarray]) -> list[TeamId]:
@@ -752,33 +700,17 @@ def smooth_possession(
     return nearest["team"]
 
 
-def ball_anchor_from_players(
-    frame: dict[str, Any],
-    anchor: dict[str, float],
-    max_player_distance: float = 14.0,
-) -> dict[str, float]:
-    players = frame.get("players", [])
-    if not players:
-        return anchor
-    nearest = min(players, key=lambda p: pitch_distance(p["position"], anchor))
-    if pitch_distance(nearest["position"], anchor) > max_player_distance:
-        return anchor
-    return lerp_position(anchor, nearest["position"], 0.35)
-
-
 def interpolate_ball_positions(frames: list[dict[str, Any]], limit: int = BALL_INTERPOLATION_LIMIT) -> list[dict[str, Any]]:
     """Fill short gaps in ball detections, matching the cleaner offline demo behavior."""
     known = [(i, frame.get("ballPosition")) for i, frame in enumerate(frames) if frame.get("ballPosition")]
     if len(known) < 2:
-        return coast_ball_positions(frames)
+        return frames
 
     for (start_idx, start_pos), (end_idx, end_pos) in zip(known, known[1:]):
         if start_pos is None or end_pos is None:
             continue
         gap = end_idx - start_idx - 1
         if gap <= 0 or gap > limit:
-            continue
-        if any(frames[start_idx + offset].get("isPitchView") is False for offset in range(1, gap + 1)):
             continue
         for offset in range(1, gap + 1):
             alpha = offset / (gap + 1)
@@ -788,31 +720,6 @@ def interpolate_ball_positions(frames: list[dict[str, Any]], limit: int = BALL_I
             if start_pitch and end_pitch:
                 frames[start_idx + offset]["pitchBall"] = lerp_position(start_pitch, end_pitch, alpha)
             frames[start_idx + offset]["ballInterpolated"] = True
-
-    return coast_ball_positions(frames)
-
-
-def coast_ball_positions(frames: list[dict[str, Any]], limit: int = BALL_COAST_LIMIT) -> list[dict[str, Any]]:
-    known = [(i, frame.get("ballPosition")) for i, frame in enumerate(frames) if frame.get("ballPosition")]
-    if not known:
-        return frames
-
-    for idx, frame in enumerate(frames):
-        if frame.get("ballPosition") or frame.get("isPitchView") is False:
-            continue
-
-        nearest_idx, nearest_pos = min(
-            known,
-            key=lambda item: abs(item[0] - idx),
-        )
-        if nearest_pos is None or abs(nearest_idx - idx) > limit:
-            continue
-
-        frame["ballPosition"] = ball_anchor_from_players(frame, nearest_pos)
-        nearest_pitch = frames[nearest_idx].get("pitchBall")
-        if nearest_pitch:
-            frame["pitchBall"] = nearest_pitch
-        frame["ballCoasted"] = True
 
     return frames
 
@@ -1122,8 +1029,8 @@ def analyze_single_frame(
         )
 
     ball_position = None
-    best_ball = choose_ball_detection(ball_detections, players, width, height, pitch_mask)
-    if best_ball:
+    if ball_detections:
+        best_ball = max(ball_detections, key=lambda d: d.confidence)
         ball_position = position_from_box(best_ball.xyxy, width, height)
 
     possession: Union[TeamId, Literal["contested"]] = "contested"
@@ -1193,8 +1100,8 @@ def analyze_precomputed_frame(
         )
 
     ball_position = None
-    best_ball = choose_ball_detection(ball_detections, players, width, height, pitch_mask if is_pitch_view else None)
-    if best_ball:
+    if ball_detections:
+        best_ball = max(ball_detections, key=lambda d: d.confidence)
         ball_position = position_from_box(best_ball.xyxy, width, height)
 
     possession: Union[TeamId, Literal["contested"]] = "contested"
