@@ -545,18 +545,30 @@ export async function POST(req: NextRequest) {
     });
     const eventConflicts = buildEventConflicts(allEvents);
     const scoreboardScore = scoreFromScoreboard(frames);
+    const clipGoalsForSynthesis = clipScopedGoals(frames, {
+      home: countEventType(allEvents, "goal", "home"),
+      away: countEventType(allEvents, "goal", "away"),
+    });
 
     // Team analysis built first to give the synthesis model numeric context.
     // Rebuilt below once vision xG is merged so the displayed team xG reflects it.
     const homeTeamPre = buildTeamAnalysis("home", frames, allEvents, scoreboardScore);
     const awayTeamPre = buildTeamAnalysis("away", frames, allEvents, scoreboardScore);
+    const homeTeamForSynthesis: TeamAnalysis = {
+      ...homeTeamPre,
+      stats: { ...homeTeamPre.stats, goals: clipGoalsForSynthesis.home },
+    };
+    const awayTeamForSynthesis: TeamAnalysis = {
+      ...awayTeamPre,
+      stats: { ...awayTeamPre.stats, goals: clipGoalsForSynthesis.away },
+    };
     const shotEvents = shotLikeEvents(allEvents);
 
     const client = new Anthropic({ apiKey });
     const synthesis = await generateSynthesis(
       client,
-      homeTeamPre,
-      awayTeamPre,
+      homeTeamForSynthesis,
+      awayTeamForSynthesis,
       shotEvents,
       eventConflicts ?? [],
       (keyFrames ?? []) as SynthesisKeyFrame[],
@@ -594,7 +606,7 @@ export async function POST(req: NextRequest) {
       analysisWarnings: [
         "Replay and broadcast angle changes are flagged when detected, but may still require coach review.",
         "Possession is sampled from frame-level visual evidence, not counted as timeline events.",
-        "Pass accuracy and distance covered are low-confidence: player IDs are assigned per frame, so cross-frame passing and movement can't be tracked reliably from broadcast angle.",
+        "Ball retention and distance covered are low-confidence: player IDs are assigned per frame, so cross-frame passing and movement can't be tracked reliably from broadcast angle.",
         ...(scoreboardScore ? ["Final score is taken from scoreboard reads; goal timeline only includes score changes observed after the clip baseline."] : []),
         ...(eventReviewWarnings ?? []),
       ],

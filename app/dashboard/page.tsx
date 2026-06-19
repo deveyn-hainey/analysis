@@ -1347,7 +1347,7 @@ function DashboardContent() {
                 <div className={EYEBROW}>action statistics</div>
                 <h2 className="mt-3 text-xl font-black text-[#f0fdf4]">Duels & Set Actions</h2>
                 <div className="mt-5">
-                  <StatsChart homeTeam={analysis.homeTeam} awayTeam={analysis.awayTeam} />
+                  <StatsChart homeTeam={displayHome} awayTeam={displayAway} />
                 </div>
               </div>
               {spatialOccupancyPanel}
