@@ -153,6 +153,8 @@ class RawFrame(BaseModel):
 
 class AnalyzeFramesRequest(BaseModel):
     frames: list[RawFrame]
+    homeKitColor: Optional[str] = None
+    awayKitColor: Optional[str] = None
 
 
 TeamId = Literal["home", "away"]
@@ -259,8 +261,19 @@ def hsv_to_circular_signature(hue: float, sat: float, val: float) -> np.ndarray:
     return np.array([np.cos(radians) * sat, np.sin(radians) * sat, sat, val], dtype=np.float32)
 
 
-def kit_color_signature(color_name: str) -> Optional[np.ndarray]:
-    hsv = KIT_COLOR_HSV.get(color_name.strip().lower())
+def normalize_kit_color(color_name: Optional[str]) -> str:
+    color = (color_name or "").strip().lower()
+    return "" if color in ("", "auto", "none", "unknown") else color
+
+
+def request_kit_colors(home_color: Optional[str] = None, away_color: Optional[str] = None) -> tuple[str, str]:
+    home = normalize_kit_color(home_color) if home_color is not None else HOME_KIT_COLOR
+    away = normalize_kit_color(away_color) if away_color is not None else AWAY_KIT_COLOR
+    return home, away
+
+
+def kit_color_signature(color_name: Optional[str]) -> Optional[np.ndarray]:
+    hsv = KIT_COLOR_HSV.get(normalize_kit_color(color_name))
     if not hsv:
         return None
     return hsv_to_circular_signature(*hsv)
@@ -330,9 +343,14 @@ def kmeans_two(features: list[np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
     return labels, centroids
 
 
-def assign_teams_by_known_kits(signatures: list[np.ndarray]) -> Optional[list[TeamId]]:
-    home_sig = kit_color_signature(HOME_KIT_COLOR)
-    away_sig = kit_color_signature(AWAY_KIT_COLOR)
+def assign_teams_by_known_kits(
+    signatures: list[np.ndarray],
+    home_kit_color: Optional[str] = None,
+    away_kit_color: Optional[str] = None,
+) -> Optional[list[TeamId]]:
+    home_color, away_color = request_kit_colors(home_kit_color, away_kit_color)
+    home_sig = kit_color_signature(home_color)
+    away_sig = kit_color_signature(away_color)
     if home_sig is None or away_sig is None or not signatures:
         return None
 
@@ -356,8 +374,8 @@ def assign_teams_by_known_kits(signatures: list[np.ndarray]) -> Optional[list[Te
     if TRACK_DIAGNOSTICS:
         logger.debug(
             "team-color: anchored home=%s away=%s count=%d avg_margin=%.3f",
-            HOME_KIT_COLOR,
-            AWAY_KIT_COLOR,
+            home_color,
+            away_color,
             len(teams),
             margin,
         )
@@ -514,12 +532,15 @@ def assign_teams(
     image: Image.Image,
     person_detections: list[Detection],
     global_centroids: Optional[tuple[np.ndarray, np.ndarray]] = None,
+    home_kit_color: Optional[str] = None,
+    away_kit_color: Optional[str] = None,
 ) -> list[TeamId]:
     features = [crop_jersey_features(image, d.xyxy) for d in person_detections]
+    home_color, away_color = request_kit_colors(home_kit_color, away_kit_color)
 
-    if HOME_KIT_COLOR and AWAY_KIT_COLOR:
+    if home_color and away_color:
         signatures = [crop_jersey_color_signature(image, d.xyxy) for d in person_detections]
-        known_kit_teams = assign_teams_by_known_kits(signatures)
+        known_kit_teams = assign_teams_by_known_kits(signatures, home_color, away_color)
         if known_kit_teams is not None:
             return known_kit_teams
 
@@ -1018,7 +1039,12 @@ def detections_for_ultralytics_result(result: Any) -> list[Detection]:
     return detections
 
 
-def analyze_single_frame(raw: RawFrame, frame_index: int) -> dict[str, Any]:
+def analyze_single_frame(
+    raw: RawFrame,
+    frame_index: int,
+    home_kit_color: Optional[str] = None,
+    away_kit_color: Optional[str] = None,
+) -> dict[str, Any]:
     image = decode_frame(raw.base64)
     width, height = image.size
     pitch_mask = compute_pitch_mask(image)
@@ -1029,7 +1055,7 @@ def analyze_single_frame(raw: RawFrame, frame_index: int) -> dict[str, Any]:
         if d.cls_name in PLAYER_CLASSES and d.cls_name not in REFEREE_CLASSES
     ]
     ball_detections = [d for d in detections if d.cls_name in BALL_CLASSES]
-    teams = assign_teams(image, person_detections)
+    teams = assign_teams(image, person_detections, None, home_kit_color, away_kit_color)
 
     players: list[dict[str, Any]] = []
     team_counts: dict[TeamId, int] = {"home": 0, "away": 0}
@@ -1168,6 +1194,8 @@ def health() -> dict[str, str]:
 def analyze_video_file(
     file: UploadFile = File(...),
     fps: float = Form(default=DEFAULT_DENSE_FPS),
+    homeKitColor: Optional[str] = Form(default=None),
+    awayKitColor: Optional[str] = Form(default=None),
 ) -> dict[str, Any]:
     """Accept a raw video file and return dense per-frame tracking data.
 
@@ -1180,6 +1208,7 @@ def analyze_video_file(
     """
     suffix = "." + (file.filename.rsplit(".", 1)[-1] if file.filename and "." in file.filename else "mp4")
     content = file.file.read()
+    home_kit_color, away_kit_color = request_kit_colors(homeKitColor, awayKitColor)
 
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
         tmp.write(content)
@@ -1195,8 +1224,9 @@ def analyze_video_file(
         frame_step = max(1, round(video_fps / fps))
 
         logger.info(
-            "analyze-video: %.1ffps video, target %.1ffps, step=%d, %d total → ~%d output frames",
+            "analyze-video: %.1ffps video, target %.1ffps, step=%d, %d total → ~%d output frames, kits home=%s away=%s",
             video_fps, fps, frame_step, total_frames, max(1, total_frames // frame_step),
+            home_kit_color or "auto", away_kit_color or "auto",
         )
 
         # ── Pass 1: calibration — pool colours from ~30 spread-out frames ──────
@@ -1266,7 +1296,7 @@ def analyze_video_file(
                     if d.cls_name in PLAYER_CLASSES and d.cls_name not in REFEREE_CLASSES
                 ]
                 tracker_ids = [d.tracker_id for d in person_dets if d.tracker_id is not None]
-                teams = assign_teams(img, person_dets, global_centroids)
+                teams = assign_teams(img, person_dets, global_centroids, home_kit_color, away_kit_color)
 
                 raw = RawFrame(base64="", timestamp=timestamp)
                 frame = analyze_precomputed_frame(raw, output_idx, img, dets, teams, pitch_mask is not None, pitch_mask)
@@ -1319,7 +1349,7 @@ def analyze_video_file(
                         d for d in dets
                         if d.cls_name in PLAYER_CLASSES and d.cls_name not in REFEREE_CLASSES
                     ]
-                    teams = assign_teams(img, person_dets, global_centroids)
+                    teams = assign_teams(img, person_dets, global_centroids, home_kit_color, away_kit_color)
 
                     raw = RawFrame(base64="", timestamp=timestamp)
                     frame = analyze_precomputed_frame(raw, output_idx, img, dets, teams, pitch_mask is not None, pitch_mask)
@@ -1390,6 +1420,7 @@ def analyze_frames(request: AnalyzeFramesRequest) -> dict[str, Any]:
     # both teams to cluster reliably on its own, and a bad frame then only costs that
     # one frame instead of corrupting team assignment for the whole video.
     frames = []
+    home_kit_color, away_kit_color = request_kit_colors(request.homeKitColor, request.awayKitColor)
     tracks: dict[TeamId, list[TrackState]] = {"home": [], "away": []}
     next_ids: dict[TeamId, int] = {"home": 0, "away": 0}
     previous_possession: Union[TeamId, Literal["contested"]] = "contested"
@@ -1401,7 +1432,7 @@ def analyze_frames(request: AnalyzeFramesRequest) -> dict[str, Any]:
             d for d in detections
             if d.cls_name in PLAYER_CLASSES and d.cls_name not in REFEREE_CLASSES
         ]
-        teams = assign_teams(image, person_detections)
+        teams = assign_teams(image, person_detections, None, home_kit_color, away_kit_color)
         frame = analyze_precomputed_frame(raw_frame, i, image, detections, teams, pitch_mask is not None, pitch_mask)
         frame = stabilize_player_ids(frame, tracks, next_ids)
         frame["possession"] = smooth_possession(frame, previous_possession)

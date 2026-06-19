@@ -32,6 +32,21 @@ const EVENT_REVIEW_CLIENT_BATCH = 4;
 const EVENT_REVIEW_CLIENT_CONCURRENCY = 4;
 
 type RawFrame = { base64: string; timestamp: number };
+type KitColor = "auto" | "white" | "blue" | "red" | "navy" | "black" | "yellow" | "orange" | "green" | "purple";
+type KitConfig = { homeKitColor: KitColor; awayKitColor: KitColor };
+
+const KIT_COLORS: Array<{ value: KitColor; label: string; swatch?: string }> = [
+  { value: "auto", label: "Auto" },
+  { value: "white", label: "White", swatch: "#f8fafc" },
+  { value: "blue", label: "Blue", swatch: "#3b82f6" },
+  { value: "red", label: "Red", swatch: "#ef4444" },
+  { value: "navy", label: "Navy", swatch: "#1e3a8a" },
+  { value: "black", label: "Black", swatch: "#111827" },
+  { value: "yellow", label: "Yellow", swatch: "#facc15" },
+  { value: "orange", label: "Orange", swatch: "#fb923c" },
+  { value: "green", label: "Green", swatch: "#22c55e" },
+  { value: "purple", label: "Purple", swatch: "#a855f7" },
+];
 
 type PitchViewResponse = {
   views?: Array<{ timestamp: number; pitchView: PitchView | null }>;
@@ -190,7 +205,7 @@ async function analyzeFrames(
   };
 }
 
-async function analyzeFramesWithWorker(rawFrames: RawFrame[]): Promise<FrameData[]> {
+async function analyzeFramesWithWorker(rawFrames: RawFrame[], kitConfig: KitConfig): Promise<FrameData[]> {
   if (!VISION_WORKER_URL) {
     throw new Error("Vision worker is not configured");
   }
@@ -198,7 +213,7 @@ async function analyzeFramesWithWorker(rawFrames: RawFrame[]): Promise<FrameData
   const res = await fetch(`${VISION_WORKER_URL}/analyze-frames`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ frames: rawFrames }),
+    body: JSON.stringify({ frames: rawFrames, ...kitConfig }),
   });
 
   if (!res.ok) {
@@ -472,13 +487,15 @@ async function reviewEventsWithClaude(
 // endpoint and stream the dense per-frame results into denseFrameStore. The user
 // is already on the dashboard by the time this resolves, and the RAF loop there
 // upgrades automatically once the store becomes "ready".
-async function fetchDenseTracking(file: File, matchId: string): Promise<void> {
+async function fetchDenseTracking(file: File, matchId: string, kitConfig: KitConfig): Promise<void> {
   if (!VISION_WORKER_URL) return;
   matchLibrary.setDense(matchId, [], "loading");
   try {
     const form = new FormData();
     form.append("file", file);
     form.append("fps", "15");
+    form.append("homeKitColor", kitConfig.homeKitColor);
+    form.append("awayKitColor", kitConfig.awayKitColor);
     const res = await fetch(`${VISION_WORKER_URL}/analyze-video`, {
       method: "POST",
       body: form,
@@ -514,6 +531,8 @@ export default function HomePage() {
   const [progress, setProgress] = useState(0);
   const [statusDetail, setStatusDetail] = useState("");
   const [errorMsg, setErrorMsg] = useState("");
+  const [homeKitColor, setHomeKitColor] = useState<KitColor>("white");
+  const [awayKitColor, setAwayKitColor] = useState<KitColor>("blue");
 
   const handleFile = useCallback(
     async (file: File) => {
@@ -528,6 +547,7 @@ export default function HomePage() {
       setStatusDetail("Reading video…");
 
       try {
+        const kitConfig: KitConfig = { homeKitColor, awayKitColor };
         const rawFrames = await extractFrames(file, (pct) => {
           setProgress(5 + pct);
           setStatusDetail("Capturing keyframes…");
@@ -553,7 +573,7 @@ export default function HomePage() {
         let eventReviewWarnings: string[] = [];
         if (VISION_WORKER_URL) {
           try {
-            analyzedFrames = await analyzeFramesWithWorker(rawFrames);
+            analyzedFrames = await analyzeFramesWithWorker(rawFrames, kitConfig);
             setProgress(72);
             setStatusDetail("Reviewing YOLO detections for match events…");
             const totalBatches = Math.ceil(rawFrames.length / EVENT_REVIEW_CLIENT_BATCH);
@@ -637,14 +657,14 @@ export default function HomePage() {
         setStatus("done");
         // Kick off dense per-frame tracking in the background — the dashboard
         // RAF loop will upgrade from sparse interpolation once it resolves.
-        if (VISION_WORKER_URL) fetchDenseTracking(file, entry.id);
+        if (VISION_WORKER_URL) fetchDenseTracking(file, entry.id, kitConfig);
         router.push("/dashboard");
       } catch (err) {
         setErrorMsg(err instanceof Error ? err.message : "Something went wrong.");
         setStatus("error");
       }
     },
-    [router]
+    [awayKitColor, homeKitColor, router]
   );
 
   const handleDemo = useCallback(async () => {
@@ -743,6 +763,49 @@ export default function HomePage() {
           {status === "error" && (
             <div className="mb-4 p-4 bg-red-500/10 border border-red-500/30 rounded-xl text-red-400 text-sm">
               {errorMsg}
+            </div>
+          )}
+
+          {!isProcessing && (
+            <div className="mb-4 rounded-xl border border-[#1c3020] bg-[#0b140b] p-4">
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-sm font-semibold text-[#f0fdf4]">Kit colors</p>
+                  <p className="text-xs text-[#6b9e6b]">Used to anchor home/away tracking for this upload.</p>
+                </div>
+                <Users className="h-5 w-5 text-green-400" />
+              </div>
+              <div className="grid grid-cols-2 gap-3" onClick={(e) => e.stopPropagation()}>
+                {[
+                  { id: "home-kit", label: "Home", value: homeKitColor, setValue: setHomeKitColor },
+                  { id: "away-kit", label: "Away", value: awayKitColor, setValue: setAwayKitColor },
+                ].map((control) => {
+                  const selected = KIT_COLORS.find((color) => color.value === control.value);
+                  return (
+                    <label key={control.id} htmlFor={control.id} className="block">
+                      <span className="mb-1 block text-xs uppercase tracking-[0.16em] text-[#6b9e6b]">{control.label}</span>
+                      <div className="flex items-center gap-2 rounded-lg border border-[#1c3020] bg-[#071007] px-3 py-2">
+                        <span
+                          className="h-4 w-4 rounded-full border border-white/20"
+                          style={{ backgroundColor: selected?.swatch ?? "transparent" }}
+                        />
+                        <select
+                          id={control.id}
+                          value={control.value}
+                          onChange={(e) => control.setValue(e.target.value as KitColor)}
+                          className="min-w-0 flex-1 bg-transparent text-sm font-medium text-[#f0fdf4] outline-none"
+                        >
+                          {KIT_COLORS.map((color) => (
+                            <option key={color.value} value={color.value} className="bg-[#071007] text-[#f0fdf4]">
+                              {color.label}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </label>
+                  );
+                })}
+              </div>
             </div>
           )}
 
