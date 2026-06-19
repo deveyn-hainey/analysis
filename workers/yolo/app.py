@@ -51,9 +51,6 @@ BALL_CONFIDENCE = float(os.getenv("YOLO_BALL_CONFIDENCE", "0.1"))
 # Reject ball boxes that are implausibly large for broadcast tracking. This is a
 # fraction of full image area, so 0.003 is ~2,800 px on 1280x720 footage.
 BALL_MAX_AREA_FRAC = float(os.getenv("YOLO_BALL_MAX_AREA_FRAC", "0.003"))
-BALL_VISUAL_FALLBACK = os.getenv("YOLO_BALL_VISUAL_FALLBACK", "1") not in ("0", "false", "False")
-BALL_VISUAL_MIN_AREA_FRAC = float(os.getenv("YOLO_BALL_VISUAL_MIN_AREA_FRAC", "0.000002"))
-BALL_VISUAL_MAX_AREA_FRAC = float(os.getenv("YOLO_BALL_VISUAL_MAX_AREA_FRAC", "0.00035"))
 # Inference resolution for the ultralytics backend. 1280 matches soccana's training
 # imgsz; override down for speed on CPU if a frame is already small, or up for even
 # tinier balls on high-res source video.
@@ -516,72 +513,6 @@ def choose_ball_detection(
     if not candidates:
         return None
     return max(candidates, key=lambda item: item[0])[1]
-
-
-def detect_visual_ball_position(
-    image: Image.Image,
-    players: list[dict[str, Any]],
-    pitch_mask: Optional[np.ndarray],
-) -> Optional[dict[str, float]]:
-    if not BALL_VISUAL_FALLBACK:
-        return None
-    if pitch_mask is None and REQUIRE_PITCH_VIEW:
-        return None
-
-    rgb = np.asarray(image)
-    height, width = rgb.shape[:2]
-    image_area = max(1, width * height)
-    hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
-
-    hue = hsv[:, :, 0]
-    sat = hsv[:, :, 1]
-    val = hsv[:, :, 2]
-    white = (val >= 168) & (sat <= 105)
-    yellow = (val >= 145) & (sat >= 55) & (hue >= 12) & (hue <= 42)
-    mask = np.where(white | yellow, 255, 0).astype(np.uint8)
-    if pitch_mask is not None:
-        mask = cv2.bitwise_and(mask, pitch_mask)
-
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    best: Optional[tuple[float, dict[str, float]]] = None
-    min_area = BALL_VISUAL_MIN_AREA_FRAC * image_area
-    max_area = BALL_VISUAL_MAX_AREA_FRAC * image_area
-    for contour in contours:
-        area = float(cv2.contourArea(contour))
-        if area < min_area or area > max_area:
-            continue
-        x, y, w, h = cv2.boundingRect(contour)
-        if w <= 1 or h <= 1:
-            continue
-        aspect = min(w, h) / max(w, h)
-        if aspect < 0.45:
-            continue
-        perimeter = float(cv2.arcLength(contour, True))
-        circularity = 0.0 if perimeter <= 0 else min(1.0, 4.0 * np.pi * area / (perimeter * perimeter))
-        if circularity < 0.32:
-            continue
-
-        cx = x + w / 2
-        cy = y + h / 2
-        position = {"x": round((cx / width) * 100, 1), "y": round((cy / height) * 100, 1)}
-        if pitch_mask is not None and not point_on_pitch(position, pitch_mask):
-            continue
-
-        nearest_player_distance = (
-            min(pitch_distance(position, player["position"]) for player in players)
-            if players
-            else 18.0
-        )
-        local_value = float(np.mean(val[y:y + h, x:x + w])) / 255.0
-        distance_penalty = max(0.0, nearest_player_distance - 18.0) * 0.018
-        score = circularity * 0.7 + aspect * 0.35 + local_value * 0.35 - distance_penalty
-        if best is None or score > best[0]:
-            best = (score, position)
-
-    return best[1] if best else None
 
 
 def split_teams(features: list[np.ndarray]) -> list[TeamId]:
@@ -1194,8 +1125,6 @@ def analyze_single_frame(
     best_ball = choose_ball_detection(ball_detections, players, width, height, pitch_mask)
     if best_ball:
         ball_position = position_from_box(best_ball.xyxy, width, height)
-    else:
-        ball_position = detect_visual_ball_position(image, players, pitch_mask)
 
     possession: Union[TeamId, Literal["contested"]] = "contested"
     possessing_player = None
@@ -1220,8 +1149,6 @@ def analyze_single_frame(
 
     if possessing_player:
         frame["possessingPlayer"] = possessing_player
-    if ball_position and best_ball is None:
-        frame["ballVisualFallback"] = True
 
     attach_pitch_positions(frame, image)
     return frame
@@ -1269,8 +1196,6 @@ def analyze_precomputed_frame(
     best_ball = choose_ball_detection(ball_detections, players, width, height, pitch_mask if is_pitch_view else None)
     if best_ball:
         ball_position = position_from_box(best_ball.xyxy, width, height)
-    else:
-        ball_position = detect_visual_ball_position(image, players, pitch_mask if is_pitch_view else None)
 
     possession: Union[TeamId, Literal["contested"]] = "contested"
     possessing_player = None
@@ -1295,8 +1220,6 @@ def analyze_precomputed_frame(
 
     if possessing_player:
         frame["possessingPlayer"] = possessing_player
-    if ball_position and best_ball is None:
-        frame["ballVisualFallback"] = True
 
     if referee_detections:
         frame["referees"] = [position_from_box(d.xyxy, width, height) for d in referee_detections]
