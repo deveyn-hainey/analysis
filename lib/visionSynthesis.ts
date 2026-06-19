@@ -104,7 +104,7 @@ function buildContextText(
 ): string {
   const team = (t: TeamAnalysis) =>
     `${t.name}:
-- Possession: ${t.stats.possession}% | Passes: ${t.stats.passes} (acc est. ${t.stats.passAccuracy}%)
+- Possession: ${t.stats.possession}% | Passes: ${t.stats.passes} | Ball retention est.: ${t.stats.passAccuracy}%
 - Shots: ${t.stats.shots} (on target ${t.stats.shotsOnTarget}) | Goals: ${t.stats.goals} | xG: ${t.stats.expectedGoals?.toFixed(2) ?? "n/a"}
 - Tackles: ${t.stats.tackles} | Fouls: ${t.stats.fouls} | Corners: ${t.stats.corners}
 - Avg player x-position: ${t.averagePosition.x}/100 (0=own goal, 100=opponent goal)`;

@@ -48,7 +48,7 @@ function StatBar({ label, home, away, suffix = "", higherIsBetter = true }: Stat
 export default function TeamComparison({ homeTeam, awayTeam }: TeamComparisonProps) {
   const rows: StatRow[] = [
     { label: "Possession", home: homeTeam.stats.possession, away: awayTeam.stats.possession, suffix: "%" },
-    { label: "Pass Accuracy", home: homeTeam.stats.passAccuracy, away: awayTeam.stats.passAccuracy, suffix: "%" },
+    { label: "Ball Retention", home: homeTeam.stats.passAccuracy, away: awayTeam.stats.passAccuracy, suffix: "%" },
     { label: "Passes", home: homeTeam.stats.passes, away: awayTeam.stats.passes },
     { label: "Shots", home: homeTeam.stats.shots, away: awayTeam.stats.shots },
     { label: "Shots on Target", home: homeTeam.stats.shotsOnTarget, away: awayTeam.stats.shotsOnTarget },

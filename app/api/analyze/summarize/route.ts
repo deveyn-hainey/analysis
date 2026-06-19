@@ -230,8 +230,8 @@ function buildTeamAnalysis(
     ? positions.reduce((s, p) => s + p.y, 0) / positions.length
     : 50;
 
-  // Pass accuracy: 0 when no passes, scales with volume since we only detect
-  // visually successful passes from frames
+  // Ball retention estimate: completed pass events divided by pass events plus
+  // turnover-like actions. UI labels this as retention rather than true pass accuracy.
   const completedPasses = passCount;
   const turnoverLike = countEventType(teamEvents, "tackle") + countEventType(teamEvents, "dribble");
   const passAccuracy = completedPasses === 0

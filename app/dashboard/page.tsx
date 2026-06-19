@@ -572,7 +572,7 @@ function VisionMetricStrip({ analysis }: { analysis: MatchAnalysis }) {
   const metrics = [
     { label: "expected goals", value: estimateXg(home).toFixed(2), suffix: "xG", sub: `conf ${Math.round((home.metricConfidence?.xg ?? 0.45) * 100)}% · vs ${estimateXg(away).toFixed(2)}`, fill: pct(estimateXg(home), estimateXg(home) + estimateXg(away)) },
     { label: "possession", value: home.possession.toString(), suffix: "%", sub: `conf ${Math.round((home.metricConfidence?.possession ?? 0.5) * 100)}% · vs ${away.possession}%`, fill: home.possession },
-    { label: "pass accuracy", value: home.passAccuracy.toString(), suffix: "%", sub: `inferred · vs ${away.passAccuracy}%`, fill: home.passAccuracy },
+    { label: "ball retention", value: home.passAccuracy.toString(), suffix: "%", sub: `inferred from possession chain · vs ${away.passAccuracy}%`, fill: home.passAccuracy },
     { label: "shots on target", value: home.shotsOnTarget.toString(), suffix: "", sub: `verified · vs ${away.shotsOnTarget}`, fill: pct(home.shotsOnTarget, home.shotsOnTarget + away.shotsOnTarget) },
     { label: "distance covered", value: (home.distanceCovered / 1000).toFixed(1), suffix: "km", sub: `stable IDs ${Math.round((home.metricConfidence?.distance ?? 0) * 100)}%`, fill: pct(home.distanceCovered, home.distanceCovered + away.distanceCovered) },
     { label: "key events", value: analysis.keyEvents.length.toString(), suffix: "", sub: `${analysis.keyEvents.filter((e) => e.isKeyMoment).length} key moments`, fill: Math.min(100, analysis.keyEvents.length * 9) },
@@ -1013,9 +1013,8 @@ function DashboardContent() {
   const displayFrame = renderableFrame(liveFrame ?? currentFrame);
   const fieldFrame = orientFrameForField(displayFrame, "broadcast");
 
-  // Override the throttled-event pass count / accuracy with the possession-chain
-  // tally so the displayed passes reflect every detected pass and accuracy tracks
-  // possession. Other stats are unchanged.
+  // Override the throttled-event pass count and retention rate with the
+  // possession-chain tally. Other stats are unchanged.
   const withPossessionPasses = (team: MatchAnalysis["homeTeam"]) => {
     const ps = passStats[team.id];
     const total = ps.completed + ps.lost;
