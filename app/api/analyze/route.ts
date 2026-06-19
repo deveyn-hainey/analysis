@@ -10,6 +10,11 @@ import type {
   AnalyzeRequest,
 } from "@/lib/types";
 import { SAMPLE_ANALYSIS } from "@/lib/sampleData";
+import { fieldPosition } from "@/lib/pitchMapping";
+
+function playerFieldPosition(frame: FrameData, player: FrameData["players"][number]) {
+  return fieldPosition(player.position, player.pitchPosition, frame.pitchView);
+}
 
 // Claude prompt for per-frame analysis
 const FRAME_PROMPT = `You are a professional soccer video analysis system. Analyze this frame from a soccer match.
@@ -162,8 +167,9 @@ function buildHeatmap(teamId: "home" | "away", allFrames: FrameData[]): number[]
   for (const frame of allFrames) {
     for (const p of frame.players) {
       if (p.team !== teamId) continue;
-      const col = Math.min(9, Math.floor(p.position.x / 10));
-      const row = Math.min(9, Math.floor(p.position.y / 10));
+      const position = playerFieldPosition(frame, p);
+      const col = Math.min(9, Math.max(0, Math.floor(position.x / 10)));
+      const row = Math.min(9, Math.max(0, Math.floor(position.y / 10)));
       grid[row][col]++;
     }
   }
@@ -214,7 +220,7 @@ function buildTeamAnalysis(
   const possessionFrames = frames.filter((f) => f.possession === id).length;
   const possession = Math.round((possessionFrames / Math.max(frames.length, 1)) * 100);
 
-  const positions = frames.flatMap((f) => f.players.filter((p) => p.team === id).map((p) => p.position));
+  const positions = frames.flatMap((f) => f.players.filter((p) => p.team === id).map((p) => playerFieldPosition(f, p)));
   const avgX = positions.length ? positions.reduce((s, p) => s + p.x, 0) / positions.length : 50;
   const avgY = positions.length ? positions.reduce((s, p) => s + p.y, 0) / positions.length : 50;
 

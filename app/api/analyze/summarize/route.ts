@@ -19,7 +19,12 @@ import {
   stableTrackingCoverage,
   teamExpectedGoals,
 } from "@/lib/visionMetrics";
+import { fieldPosition } from "@/lib/pitchMapping";
 import { runVisionSynthesis, shotKey, type SynthesisKeyFrame, type VisionGoal } from "@/lib/visionSynthesis";
+
+function playerFieldPosition(frame: FrameData, player: FrameData["players"][number]) {
+  return fieldPosition(player.position, player.pitchPosition, frame.pitchView);
+}
 
 function calcDistanceCovered(teamId: TeamId, frames: FrameData[]): number {
   let total = 0;
@@ -30,7 +35,7 @@ function calcDistanceCovered(teamId: TeamId, frames: FrameData[]): number {
       if (!isStablePlayerId(player.id) || player.number <= 0) continue;
       const prevPlayer = prev.players.find((p) => p.id === player.id);
       if (!prevPlayer) continue;
-      const step = distanceMeters(player.position, prevPlayer.position);
+      const step = distanceMeters(playerFieldPosition(curr, player), playerFieldPosition(prev, prevPlayer));
       if (step <= 9) total += step;
     }
   }
@@ -42,8 +47,9 @@ function buildHeatmap(teamId: TeamId, frames: FrameData[]): number[][] {
   for (const frame of frames) {
     for (const p of frame.players) {
       if (p.team !== teamId) continue;
-      const col = Math.min(9, Math.floor(p.position.x / 10));
-      const row = Math.min(9, Math.floor(p.position.y / 10));
+      const position = playerFieldPosition(frame, p);
+      const col = Math.min(9, Math.max(0, Math.floor(position.x / 10)));
+      const row = Math.min(9, Math.max(0, Math.floor(position.y / 10)));
       grid[row][col]++;
     }
   }
@@ -215,7 +221,7 @@ function buildTeamAnalysis(
       : 50;
 
   const positions = frames.flatMap((f) =>
-    f.players.filter((p) => p.team === id).map((p) => p.position)
+    f.players.filter((p) => p.team === id).map((p) => playerFieldPosition(f, p))
   );
   const avgX = positions.length
     ? positions.reduce((s, p) => s + p.x, 0) / positions.length
@@ -378,7 +384,7 @@ function enrichInsightEvidence(
     evidence.add(`defensive events: ${homeTeam.name} ${homeTeam.stats.tackles} tackles, ${awayTeam.name} ${awayTeam.stats.tackles} tackles`);
     evidence.add(`shots conceded/on target context: ${homeTeam.name} ${homeTeam.stats.shotsOnTarget} SOT, ${awayTeam.name} ${awayTeam.stats.shotsOnTarget} SOT`);
   } else if (insight.category === "tactical") {
-    evidence.add(`camera-space average positions: ${homeTeam.name} x=${homeTeam.averagePosition.x}, ${awayTeam.name} x=${awayTeam.averagePosition.x}`);
+    evidence.add(`field-space average positions: ${homeTeam.name} x=${homeTeam.averagePosition.x}, ${awayTeam.name} x=${awayTeam.averagePosition.x}`);
   } else if (insight.category === "physical") {
     evidence.add(`stable-ID distance estimate: ${homeTeam.name} ${homeTeam.stats.distanceCovered}m, ${awayTeam.name} ${awayTeam.stats.distanceCovered}m`);
   }

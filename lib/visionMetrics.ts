@@ -1,4 +1,5 @@
 import type { FrameData, MatchEvent, Position, TeamId } from "@/lib/types";
+import { fieldPosition } from "@/lib/pitchMapping";
 
 const PITCH_M_X = 105;
 const PITCH_M_Y = 68;
@@ -131,6 +132,7 @@ export function buildPassNetwork(frames: FrameData[], team: TeamId) {
 
     const player = frame.players.find((p) => p.id === touch.playerId && p.team === team);
     if (player) {
+      const position = fieldPosition(player.position, player.pitchPosition, frame.pitchView);
       const current = nodes.get(player.id);
       nodes.set(player.id, {
         id: player.id,
@@ -138,10 +140,10 @@ export function buildPassNetwork(frames: FrameData[], team: TeamId) {
         team,
         position: current
           ? {
-              x: (current.position.x * current.touches + player.position.x) / (current.touches + 1),
-              y: (current.position.y * current.touches + player.position.y) / (current.touches + 1),
+              x: (current.position.x * current.touches + position.x) / (current.touches + 1),
+              y: (current.position.y * current.touches + position.y) / (current.touches + 1),
             }
-          : player.position,
+          : position,
         touches: (current?.touches ?? 0) + 1,
       });
     }
