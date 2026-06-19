@@ -42,6 +42,8 @@ export interface VisionSynthesisResult {
   usedVision: boolean;
 }
 
+type KitColorContext = { homeKitColor?: string; awayKitColor?: string };
+
 export function shotKey(timestamp: number): string {
   return timestamp.toFixed(1);
 }
@@ -97,7 +99,8 @@ function buildContextText(
   homeTeam: TeamAnalysis,
   awayTeam: TeamAnalysis,
   shotEvents: MatchEvent[],
-  eventConflicts: Array<{ timestamp: number; type: string; conflicts?: string[]; pipelineFlag?: string }>
+  eventConflicts: Array<{ timestamp: number; type: string; conflicts?: string[]; pipelineFlag?: string }>,
+  kitColors?: KitColorContext
 ): string {
   const team = (t: TeamAnalysis) =>
     `${t.name}:
@@ -119,7 +122,19 @@ function buildContextText(
         .join("\n")
     : "- None";
 
-  return `HOME ${team(homeTeam)}
+  const normalizeKit = (color?: string) => {
+    const value = (color ?? "").trim().toLowerCase();
+    return value && value !== "auto" ? value : "";
+  };
+  const homeKit = normalizeKit(kitColors?.homeKitColor);
+  const awayKit = normalizeKit(kitColors?.awayKitColor);
+  const kitContext = homeKit && awayKit
+    ? `User-selected tracking color context: HOME corresponds to ${homeKit} kits; AWAY corresponds to ${awayKit} kits. Use this only to interpret players in the provided frames. Do not repeat kit colors or home/away labels in the public summary.`
+    : "User-selected tracking color context: not provided or set to auto; do not infer team identity from kit color.";
+
+  return `${kitContext}
+
+HOME ${team(homeTeam)}
 
 AWAY ${team(awayTeam)}
 
@@ -165,12 +180,13 @@ export async function runVisionSynthesis(
     shotEvents: MatchEvent[];
     eventConflicts: Array<{ timestamp: number; type: string; conflicts?: string[]; pipelineFlag?: string }>;
     keyFrames: SynthesisKeyFrame[];
+    kitColors?: KitColorContext;
   }
 ): Promise<VisionSynthesisResult> {
-  const { homeTeam, awayTeam, shotEvents, eventConflicts, keyFrames } = args;
+  const { homeTeam, awayTeam, shotEvents, eventConflicts, keyFrames, kitColors } = args;
 
   const content: Array<ImageBlock | TextBlock> = [];
-  content.push({ type: "text", text: buildContextText(homeTeam, awayTeam, shotEvents, eventConflicts) });
+  content.push({ type: "text", text: buildContextText(homeTeam, awayTeam, shotEvents, eventConflicts, kitColors) });
 
   if (keyFrames.length > 0) {
     content.push({ type: "text", text: `\nKEY FRAMES (${keyFrames.length}), each labelled with its timestamp:` });

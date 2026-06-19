@@ -204,6 +204,9 @@ export interface AnalyzeFrameRequest {
 // Payload for final summarize step
 export interface SummarizeRequest {
   frames: FrameData[];
+  // User-selected kit colors for this upload. Used only as context for the vision
+  // synthesis model; "auto" means no reliable color anchor was provided.
+  kitColors?: { homeKitColor?: string; awayKitColor?: string };
   // Warnings from the /api/analyze/events review step (e.g. a batch's Claude call
   // failed and fell back to heuristic-only events) — surfaced to the coach instead
   // of being silently discarded, since it explains why some events lack full review.

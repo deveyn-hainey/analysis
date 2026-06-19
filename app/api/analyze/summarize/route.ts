@@ -481,7 +481,8 @@ async function generateSynthesis(
   awayTeam: TeamAnalysis,
   shotEvents: MatchEvent[],
   eventConflicts: NonNullable<MatchAnalysis["eventConflicts"]>,
-  keyFrames: SynthesisKeyFrame[]
+  keyFrames: SynthesisKeyFrame[],
+  kitColors?: SummarizeRequest["kitColors"]
 ): Promise<SynthesisOutput> {
   try {
     const result = await runVisionSynthesis(client, {
@@ -490,6 +491,7 @@ async function generateSynthesis(
       shotEvents,
       eventConflicts,
       keyFrames,
+      kitColors,
     });
 
     const insights = dedupeInsights(
@@ -525,7 +527,7 @@ export async function POST(req: NextRequest) {
     }
 
     const body = (await req.json()) as SummarizeRequest;
-    const { frames, eventReviewWarnings, keyFrames } = body;
+    const { frames, eventReviewWarnings, keyFrames, kitColors } = body;
 
     if (!frames || frames.length === 0) {
       return NextResponse.json({ error: "No frames provided." }, { status: 400 });
@@ -557,7 +559,8 @@ export async function POST(req: NextRequest) {
       awayTeamPre,
       shotEvents,
       eventConflicts ?? [],
-      (keyFrames ?? []) as SynthesisKeyFrame[]
+      (keyFrames ?? []) as SynthesisKeyFrame[],
+      kitColors
     );
 
     // Merge per-shot vision xG onto matching events; tag every shot-like event

@@ -629,7 +629,7 @@ export default function HomePage() {
         const sumRes = await fetch("/api/analyze/summarize", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ frames: analyzedFrames, eventReviewWarnings, keyFrames }),
+          body: JSON.stringify({ frames: analyzedFrames, eventReviewWarnings, keyFrames, kitColors: kitConfig }),
         });
 
         if (!sumRes.ok) {
