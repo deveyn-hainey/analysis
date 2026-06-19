@@ -24,6 +24,25 @@ let _activeId: string | null = null;
 const _listeners = new Set<() => void>();
 const notify = () => _listeners.forEach((fn) => fn());
 
+function withNearestPitchViews(denseFrames: FrameData[], sparseFrames: FrameData[]): FrameData[] {
+  const views = sparseFrames
+    .filter((frame) => frame.pitchView)
+    .sort((a, b) => a.timestamp - b.timestamp);
+  if (views.length === 0) return denseFrames;
+
+  return denseFrames.map((frame) => {
+    if (frame.pitchView || frame.pitchBall || frame.players.some((player) => player.pitchPosition)) {
+      return frame;
+    }
+    const nearest = views.reduce((best, candidate) =>
+      Math.abs(candidate.timestamp - frame.timestamp) < Math.abs(best.timestamp - frame.timestamp)
+        ? candidate
+        : best
+    );
+    return nearest.pitchView ? { ...frame, pitchView: nearest.pitchView } : frame;
+  });
+}
+
 // Load an entry into the shared "active view" buffers the dashboard reads from.
 function hydrate(entry: MatchEntry) {
   videoStore.set(entry.videoUrl);
@@ -77,10 +96,10 @@ export const matchLibrary = {
   setDense(id: string, frames: FrameData[], status: DenseStatus) {
     const entry = _entries.find((e) => e.id === id);
     if (!entry) return;
-    entry.denseFrames = frames;
+    entry.denseFrames = status === "ready" ? withNearestPitchViews(frames, entry.analysis.frames) : frames;
     entry.denseStatus = status;
     if (_activeId === id) {
-      if (status === "ready") denseFrameStore.setReady(frames);
+      if (status === "ready") denseFrameStore.setReady(entry.denseFrames);
       else if (status === "loading") denseFrameStore.setLoading();
       else if (status === "error") denseFrameStore.setError();
       else denseFrameStore.clear();

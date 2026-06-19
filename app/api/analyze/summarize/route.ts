@@ -19,7 +19,7 @@ import {
   stableTrackingCoverage,
   teamExpectedGoals,
 } from "@/lib/visionMetrics";
-import { runVisionSynthesis, shotKey, type SynthesisKeyFrame } from "@/lib/visionSynthesis";
+import { runVisionSynthesis, shotKey, type SynthesisKeyFrame, type VisionGoal } from "@/lib/visionSynthesis";
 
 function calcDistanceCovered(teamId: TeamId, frames: FrameData[]): number {
   let total = 0;
@@ -415,7 +415,35 @@ interface SynthesisOutput {
   insights: CoachingInsight[];
   outcome: OutcomeProjection;
   summary: string;
+  goals: VisionGoal[];
   shotXg: Map<string, number>;
+}
+
+// Turn vision-detected goals into goal events, skipping any that duplicate a goal
+// already on the timeline (e.g. one synthesized from the scoreboard) for the same
+// team within 10s. Gives the timeline a goal with a real timestamp + team even
+// when the scoreboard is illegible.
+function buildVisionGoalEvents(goals: VisionGoal[], existing: MatchEvent[]): MatchEvent[] {
+  const events: MatchEvent[] = [];
+  for (const goal of goals) {
+    const duplicate = [...existing, ...events].some(
+      (e) => e.type === "goal" && e.team === goal.team && Math.abs(e.timestamp - goal.timestamp) <= 10
+    );
+    if (duplicate) continue;
+    const event: MatchEvent = {
+      id: `vision-goal-${goal.timestamp.toFixed(1)}-${goal.team}`,
+      timestamp: goal.timestamp,
+      type: "goal",
+      team: goal.team,
+      description: goal.description,
+      confidence: 0.82,
+      isKeyMoment: true,
+      source: "llm",
+      evidenceUsed: ["vision model confirmed ball crossing the line / goal restart"],
+    };
+    events.push({ ...event, xg: estimateShotXg(event), xgSource: "vision" });
+  }
+  return events;
 }
 
 // Drop near-duplicate insights (same title, or same category targeting the same
@@ -468,12 +496,13 @@ async function generateSynthesis(
       ? { ...result.outcome, source: "vision" }
       : buildFallbackOutcome(homeTeam, awayTeam);
 
-    return { insights, outcome, summary: result.summary, shotXg: result.shotXg };
+    return { insights, outcome, summary: result.summary, goals: result.goals, shotXg: result.shotXg };
   } catch {
     return {
       insights: dedupeInsights(buildFallbackInsights(homeTeam, awayTeam)),
       outcome: buildFallbackOutcome(homeTeam, awayTeam),
       summary: "",
+      goals: [],
       shotXg: new Map(),
     };
   }
@@ -534,6 +563,11 @@ export async function POST(req: NextRequest) {
         ? { ...event, xg: visionXg, xgSource: "vision" as const }
         : { ...event, xgSource: "positional" as const };
     });
+
+    // Add goals the vision model confirmed from the frames (ball crossing the
+    // line), skipping any that duplicate an existing goal on the timeline.
+    keyEvents.push(...buildVisionGoalEvents(synthesis.goals, keyEvents));
+    keyEvents.sort((a, b) => a.timestamp - b.timestamp);
 
     const homeTeam = buildTeamAnalysis("home", frames, keyEvents, scoreboardScore);
     const awayTeam = buildTeamAnalysis("away", frames, keyEvents, scoreboardScore);

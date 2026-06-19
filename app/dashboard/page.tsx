@@ -183,6 +183,10 @@ function interpolateFrame(a: FrameData, b: FrameData, alpha: number): FrameData 
     return {
       ...player,
       position: lerpPosition(player.position, match.position, alpha),
+      pitchPosition:
+        player.pitchPosition && match.pitchPosition
+          ? lerpPosition(player.pitchPosition, match.pitchPosition, alpha)
+          : player.pitchPosition,
     };
   });
 
@@ -193,8 +197,10 @@ function interpolateFrame(a: FrameData, b: FrameData, alpha: number): FrameData 
           y: a.ballPosition.y + (b.ballPosition.y - a.ballPosition.y) * alpha,
         }
       : a.ballPosition;
+  const pitchBall =
+    a.pitchBall && b.pitchBall ? lerpPosition(a.pitchBall, b.pitchBall, alpha) : a.pitchBall;
 
-  return { ...a, players, ballPosition };
+  return { ...a, players, ballPosition, pitchBall };
 }
 
 function interpolateDenseFrame(frames: FrameData[], timestamp: number): FrameData {
@@ -225,6 +231,10 @@ function easeDisplayedFrame(previous: FrameData | null, target: FrameData): Fram
     return {
       ...player,
       position: lerpPosition(prev.position, player.position, 0.42),
+      pitchPosition:
+        prev.pitchPosition && player.pitchPosition
+          ? lerpPosition(prev.pitchPosition, player.pitchPosition, 0.42)
+          : player.pitchPosition,
     };
   });
 
@@ -232,8 +242,12 @@ function easeDisplayedFrame(previous: FrameData | null, target: FrameData): Fram
     previous.ballPosition && target.ballPosition
       ? lerpPosition(previous.ballPosition, target.ballPosition, 0.55)
       : target.ballPosition;
+  const pitchBall =
+    previous.pitchBall && target.pitchBall
+      ? lerpPosition(previous.pitchBall, target.pitchBall, 0.55)
+      : target.pitchBall;
 
-  return { ...target, players: smoothedPlayers, ballPosition };
+  return { ...target, players: smoothedPlayers, ballPosition, pitchBall };
 }
 
 type FieldOrientation = "broadcast" | "mirrored";
@@ -251,9 +265,12 @@ function orientFrameForField(frame: FrameData, orientation: FieldOrientation): F
     players: frame.players.map((player) => ({
       ...player,
       position: orientPosition(player.position, orientation),
+      pitchPosition: player.pitchPosition ? orientPosition(player.pitchPosition, orientation) : undefined,
     })),
     ballPosition: frame.ballPosition ? orientPosition(frame.ballPosition, orientation) : undefined,
+    pitchBall: frame.pitchBall ? orientPosition(frame.pitchBall, orientation) : undefined,
     referees: frame.referees?.map((position) => orientPosition(position, orientation)),
+    pitchReferees: frame.pitchReferees?.map((position) => orientPosition(position, orientation)),
   };
 }
 

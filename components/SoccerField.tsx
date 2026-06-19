@@ -1,14 +1,11 @@
 "use client";
 
 import { useState } from "react";
-import type { FrameData, PitchView, Player, Position } from "@/lib/types";
+import type { FrameData, Player } from "@/lib/types";
+import { fieldPosition, hasPitchCalibration, mapImagePositionToPitch } from "@/lib/pitchMapping";
 
 interface SoccerFieldProps {
   frame: FrameData;
-  // When provided, image-space positions are projected onto true pitch coordinates
-  // so a half-field camera shot lands in the correct half of the board instead of
-  // being normalized to the middle. Omit to render raw image positions.
-  pitchView?: PitchView;
 }
 
 const W = 700;
@@ -16,20 +13,6 @@ const H = 454;
 
 const px = (x: number) => (x / 100) * W;
 const py = (y: number) => (y / 100) * H;
-
-const clamp01 = (n: number) => Math.min(100, Math.max(0, n));
-
-// Map a broadcast image position (0–100 of the frame) to pitch coordinates using
-// the estimated visible window. Linear approximation: horizontal spans the visible
-// pitch-length range; vertical maps the on-field band (below the far touchline) to
-// the full pitch width. Perspective curvature is not modelled.
-function toPitchCoords(pos: Position, view?: PitchView): Position {
-  if (!view) return pos;
-  const x = view.lengthMin + (pos.x / 100) * (view.lengthMax - view.lengthMin);
-  const denom = Math.max(1, 100 - view.topImageY);
-  const y = ((pos.y - view.topImageY) / denom) * 100;
-  return { x: clamp01(x), y: clamp01(y) };
-}
 
 const ROLE_LABELS: Record<Player["role"], string> = {
   gk: "GK",
@@ -44,10 +27,12 @@ const ACTION_COLORS: Partial<Record<Player["action"], string>> = {
   passing: "#06b6d4",
 };
 
-export default function SoccerField({ frame, pitchView }: SoccerFieldProps) {
+export default function SoccerField({ frame }: SoccerFieldProps) {
   const [hovered, setHovered] = useState<string | null>(null);
   const hoveredPlayer = frame.players.find((p) => p.id === hovered);
-  const ball = frame.ballPosition ? toPitchCoords(frame.ballPosition, pitchView) : null;
+  const calibrated = hasPitchCalibration(frame);
+  const ball = frame.pitchBall ?? (frame.ballPosition ? mapImagePositionToPitch(frame.ballPosition, frame.pitchView) : null);
+  const referees = frame.pitchReferees ?? frame.referees?.map((pos) => mapImagePositionToPitch(pos, frame.pitchView));
 
   return (
     <div className="relative w-full">
@@ -90,8 +75,7 @@ export default function SoccerField({ frame, pitchView }: SoccerFieldProps) {
         <path d={`M ${W - 8},${H - 8} A 16,16 0 0,1 ${W - 24},${H - 8}`} fill="none" stroke="white" strokeWidth={1.5} opacity={0.5} />
 
         {/* Referees */}
-        {frame.referees?.map((rawPos, i) => {
-          const pos = toPitchCoords(rawPos, pitchView);
+        {referees?.map((pos, i) => {
           return (
           <circle
             key={`ref-${i}`}
@@ -115,9 +99,9 @@ export default function SoccerField({ frame, pitchView }: SoccerFieldProps) {
 
         {/* Players */}
         {frame.players.map((player) => {
-          const mapped = toPitchCoords(player.position, pitchView);
-          const x = px(mapped.x);
-          const y = py(mapped.y);
+          const pos = fieldPosition(player.position, player.pitchPosition, frame.pitchView);
+          const x = px(pos.x);
+          const y = py(pos.y);
           const color = player.team === "home" ? "#ef4444" : "#3b82f6";
           const accent = ACTION_COLORS[player.action];
           const isHovered = hovered === player.id;
@@ -174,6 +158,11 @@ export default function SoccerField({ frame, pitchView }: SoccerFieldProps) {
           <div className="flex items-center gap-1.5">
             <div className="w-3 h-3 rounded-full bg-black border-2 border-yellow-400" />
             <span className="text-[#6b9e6b]">Ref</span>
+          </div>
+        )}
+        {!calibrated && frame.pitchView && (
+          <div className="hidden sm:flex items-center gap-1.5 text-[#829086]">
+            <span>View map</span>
           </div>
         )}
       </div>

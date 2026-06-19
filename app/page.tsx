@@ -14,7 +14,7 @@ import {
   Cpu,
   BarChart3,
 } from "lucide-react";
-import type { AnalyzeEventsRequest, AnalyzeFrameRequest, FrameData, MatchAnalysis, MatchEvent } from "@/lib/types";
+import type { AnalyzeEventsRequest, AnalyzeFrameRequest, FrameData, MatchAnalysis, MatchEvent, PitchView } from "@/lib/types";
 import { videoStore } from "@/lib/videoStore";
 import { matchLibrary, type MatchEntry } from "@/lib/matchLibrary";
 
@@ -32,6 +32,10 @@ const EVENT_REVIEW_CLIENT_BATCH = 4;
 const EVENT_REVIEW_CLIENT_CONCURRENCY = 4;
 
 type RawFrame = { base64: string; timestamp: number };
+
+type PitchViewResponse = {
+  views?: Array<{ timestamp: number; pitchView: PitchView | null }>;
+};
 
 function frameInterval(durationSeconds: number): number {
   // 6s cap for longer clips: a 2:30 video → 25 frames (vs 38 at 4s cap).
@@ -208,6 +212,33 @@ async function analyzeFramesWithWorker(rawFrames: RawFrame[]): Promise<FrameData
   }
 
   return data.frames;
+}
+
+async function estimatePitchViews(rawFrames: RawFrame[]): Promise<Map<number, PitchView>> {
+  try {
+    const res = await fetch("/api/analyze/pitch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ frames: rawFrames }),
+    });
+    if (!res.ok) return new Map();
+    const data = (await res.json()) as PitchViewResponse;
+    const views = new Map<number, PitchView>();
+    data.views?.forEach((entry, index) => {
+      if (entry.pitchView) views.set(index, entry.pitchView);
+    });
+    return views;
+  } catch {
+    return new Map();
+  }
+}
+
+function attachPitchViews(frames: FrameData[], views: Map<number, PitchView>): FrameData[] {
+  if (views.size === 0) return frames;
+  return frames.map((frame, index) => {
+    const pitchView = views.get(frame.frameIndex) ?? views.get(index);
+    return pitchView ? { ...frame, pitchView } : frame;
+  });
 }
 
 // Sends scoreboard reads across every frame and synthesises goal events wherever
@@ -544,6 +575,10 @@ export default function HomePage() {
           }
           analyzedFrames = claudeResult.frames;
         }
+
+        setStatusDetail("Calibrating visible pitch window…");
+        const pitchViews = await estimatePitchViews(rawFrames);
+        analyzedFrames = attachPitchViews(analyzedFrames, pitchViews);
 
         setStatus("summarizing");
         setStatusDetail("Building match insights…");

@@ -38,9 +38,22 @@ export interface Player {
   id: string;
   number: number;
   team: TeamId;
-  position: Position;
+  position: Position; // image-space % of the broadcast frame (used by the ring overlay)
+  // True pitch coordinates (0-100, x=length/left-goal=0, y=width/top=0) from the
+  // worker's keypoint homography. Present only when calibration succeeded; the
+  // tactical board uses it, the live overlay never does.
+  pitchPosition?: Position;
   action: PlayerAction;
   role: "gk" | "def" | "mid" | "fwd";
+}
+
+// Estimated mapping from a broadcast image crop to true pitch coordinates.
+// Used only as a fallback when keypoint homography did not produce pitchPosition.
+export interface PitchView {
+  lengthMin: number;
+  lengthMax: number;
+  topImageY: number;
+  confidence?: number;
 }
 
 export interface MatchEvent {
@@ -76,26 +89,16 @@ export interface OutcomeProjection {
   source: "vision" | "fallback";
 }
 
-// Estimated mapping from this frame's broadcast image to true pitch coordinates,
-// used only by the tactical board so a half-field camera shot lands in the right
-// half of the pitch instead of being normalized to the middle. The ring/overlay
-// tracking ignores this and keeps using raw image-space `position`.
-//   lengthMin/lengthMax: pitch length % (0 = left goal line, 100 = right) visible
-//     at the image's left / right edges.
-//   topImageY: image y % (0 = top, 100 = bottom) where the playing field begins
-//     (far touchline / horizon), excluding crowd and stands above it.
-export interface PitchView {
-  lengthMin: number;
-  lengthMax: number;
-  topImageY: number;
-}
-
 export interface FrameData {
   frameIndex: number;
   timestamp: number;
   pitchView?: PitchView;
   players: Player[];
   ballPosition?: Position;
+  // True pitch coordinates for the ball / referees (keypoint homography), mirroring
+  // Player.pitchPosition. Present only when calibration succeeded.
+  pitchBall?: Position;
+  pitchReferees?: Position[];
   events: MatchEvent[];
   possession: TeamId | "contested";
   // Player with closest contact to the ball — used for cross-frame pass counting

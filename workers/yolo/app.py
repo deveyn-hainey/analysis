@@ -20,6 +20,17 @@ from pydantic import BaseModel
 from PIL import Image
 from ultralytics import YOLO
 
+# Optional pitch homography (projects players/ball onto true pitch coords for the
+# tactical board). Import is guarded so a missing/broken module never breaks the
+# worker — attach_pitch_positions becomes a no-op.
+try:
+    from pitch_homography import attach_pitch_positions
+except Exception as _pitch_exc:  # pragma: no cover
+    logger.warning("pitch_homography unavailable: %s", _pitch_exc)
+
+    def attach_pitch_positions(frame: dict, image) -> None:  # type: ignore
+        return None
+
 
 MODEL_PATH = os.getenv("YOLO_MODEL_PATH", "yolo11n.pt")
 MODEL_BACKEND = os.getenv("YOLO_BACKEND", "auto").lower()
@@ -484,6 +495,22 @@ def pitch_distance(a: dict[str, float], b: dict[str, float]) -> float:
     return float(np.hypot(a["x"] - b["x"], a["y"] - b["y"]))
 
 
+def lerp_position(start: dict[str, float], end: dict[str, float], alpha: float) -> dict[str, float]:
+    return {
+        "x": round(start["x"] * (1 - alpha) + end["x"] * alpha, 1),
+        "y": round(start["y"] * (1 - alpha) + end["y"] * alpha, 1),
+    }
+
+
+def mirror_pitch_position(position: dict[str, float]) -> dict[str, float]:
+    return {"x": round(100.0 - position["x"], 1), "y": round(position["y"], 1)}
+
+
+def pitch_position_distance(a: dict[str, float], b: dict[str, float], mirrored: bool = False) -> float:
+    pos = mirror_pitch_position(a) if mirrored else a
+    return pitch_distance(pos, b)
+
+
 def box_area(box: tuple[float, float, float, float]) -> float:
     x1, y1, x2, y2 = box
     return max(0.0, x2 - x1) * max(0.0, y2 - y1)
@@ -659,11 +686,52 @@ def interpolate_ball_positions(frames: list[dict[str, Any]], limit: int = BALL_I
             continue
         for offset in range(1, gap + 1):
             alpha = offset / (gap + 1)
-            frames[start_idx + offset]["ballPosition"] = {
-                "x": round(start_pos["x"] * (1 - alpha) + end_pos["x"] * alpha, 1),
-                "y": round(start_pos["y"] * (1 - alpha) + end_pos["y"] * alpha, 1),
-            }
+            frames[start_idx + offset]["ballPosition"] = lerp_position(start_pos, end_pos, alpha)
+            start_pitch = frames[start_idx].get("pitchBall")
+            end_pitch = frames[end_idx].get("pitchBall")
+            if start_pitch and end_pitch:
+                frames[start_idx + offset]["pitchBall"] = lerp_position(start_pitch, end_pitch, alpha)
             frames[start_idx + offset]["ballInterpolated"] = True
+
+    return frames
+
+
+def mirror_frame_pitch_positions(frame: dict[str, Any]) -> None:
+    for player in frame.get("players", []):
+        if player.get("pitchPosition"):
+            player["pitchPosition"] = mirror_pitch_position(player["pitchPosition"])
+    if frame.get("pitchBall"):
+        frame["pitchBall"] = mirror_pitch_position(frame["pitchBall"])
+    if frame.get("pitchReferees"):
+        frame["pitchReferees"] = [mirror_pitch_position(pos) for pos in frame["pitchReferees"]]
+    frame["pitchMirroredCorrection"] = True
+
+
+def stabilize_pitch_orientation(frames: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Correct occasional left/right homography flips after camera-angle changes."""
+    previous_by_id: dict[str, dict[str, float]] = {}
+
+    for frame in frames:
+        current = {
+            player["id"]: player["pitchPosition"]
+            for player in frame.get("players", [])
+            if player.get("pitchPosition")
+        }
+        shared = [(pid, pos, previous_by_id[pid]) for pid, pos in current.items() if pid in previous_by_id]
+
+        if len(shared) >= 3:
+            normal = sum(pitch_position_distance(pos, prev) for _, pos, prev in shared) / len(shared)
+            mirrored = sum(pitch_position_distance(pos, prev, mirrored=True) for _, pos, prev in shared) / len(shared)
+            if normal > 25 and mirrored + 8 < normal:
+                mirror_frame_pitch_positions(frame)
+                current = {
+                    player["id"]: player["pitchPosition"]
+                    for player in frame.get("players", [])
+                    if player.get("pitchPosition")
+                }
+
+        if current:
+            previous_by_id.update(current)
 
     return frames
 
@@ -724,21 +792,70 @@ def interpolate_player_positions(
                 continue
             for offset in range(1, gap + 1):
                 alpha = offset / (gap + 1)
-                position = {
-                    "x": round(start_p["position"]["x"] * (1 - alpha) + end_p["position"]["x"] * alpha, 1),
-                    "y": round(start_p["position"]["y"] * (1 - alpha) + end_p["position"]["y"] * alpha, 1),
-                }
-                frames[start_idx + offset]["players"].append({
+                position = lerp_position(start_p["position"], end_p["position"], alpha)
+                player = {
                     **start_p,
                     "position": position,
                     "role": player_role(position, start_p["team"]),
                     # Slightly below a real detection so pruning prefers live boxes.
                     "detectionConfidence": round(float(start_p.get("detectionConfidence", 0.5)) * 0.9, 3),
                     "inferred": True,
-                })
+                }
+                if start_p.get("pitchPosition") and end_p.get("pitchPosition"):
+                    player["pitchPosition"] = lerp_position(
+                        start_p["pitchPosition"], end_p["pitchPosition"], alpha
+                    )
+                frames[start_idx + offset]["players"].append(player)
 
     for frame in frames:
         frame["players"] = prune_team_players(frame["players"])
+    return frames
+
+
+def fill_missing_pitch_positions(
+    frames: list[dict[str, Any]],
+    limit: int = max(PLAYER_INTERPOLATION_LIMIT, BALL_INTERPOLATION_LIMIT),
+) -> list[dict[str, Any]]:
+    """Fill short calibrated-coordinate gaps for existing tracks after cutaways."""
+    appearances: dict[str, list[tuple[int, dict[str, Any]]]] = {}
+    for idx, frame in enumerate(frames):
+        for player in frame.get("players", []):
+            if player.get("pitchPosition"):
+                appearances.setdefault(player["id"], []).append((idx, player))
+
+    for pid, seen in appearances.items():
+        for (start_idx, start_p), (end_idx, end_p) in zip(seen, seen[1:]):
+            gap = end_idx - start_idx - 1
+            if gap <= 0 or gap > limit:
+                continue
+            for offset in range(1, gap + 1):
+                player = next(
+                    (p for p in frames[start_idx + offset].get("players", []) if p.get("id") == pid),
+                    None,
+                )
+                if not player or player.get("pitchPosition"):
+                    continue
+                alpha = offset / (gap + 1)
+                player["pitchPosition"] = lerp_position(
+                    start_p["pitchPosition"], end_p["pitchPosition"], alpha
+                )
+                player["pitchInterpolated"] = True
+
+    known_ball = [(i, frame.get("pitchBall")) for i, frame in enumerate(frames) if frame.get("pitchBall")]
+    for (start_idx, start_pos), (end_idx, end_pos) in zip(known_ball, known_ball[1:]):
+        if start_pos is None or end_pos is None:
+            continue
+        gap = end_idx - start_idx - 1
+        if gap <= 0 or gap > limit:
+            continue
+        for offset in range(1, gap + 1):
+            frame = frames[start_idx + offset]
+            if frame.get("pitchBall") or not frame.get("ballPosition"):
+                continue
+            alpha = offset / (gap + 1)
+            frame["pitchBall"] = lerp_position(start_pos, end_pos, alpha)
+            frame["pitchInterpolated"] = True
+
     return frames
 
 
@@ -899,6 +1016,7 @@ def analyze_single_frame(raw: RawFrame, frame_index: int) -> dict[str, Any]:
     if possessing_player:
         frame["possessingPlayer"] = possessing_player
 
+    attach_pitch_positions(frame, image)
     return frame
 
 
@@ -969,6 +1087,7 @@ def analyze_precomputed_frame(
     if referee_detections:
         frame["referees"] = [position_from_box(d.xyxy, width, height) for d in referee_detections]
 
+    attach_pitch_positions(frame, image)
     return frame
 
 
@@ -1163,7 +1282,9 @@ def analyze_video_file(
                 len(set().union(*pre_post_ids)) if pre_post_ids else 0,
             )
         dense_frames = consolidate_player_teams(dense_frames)
+        dense_frames = stabilize_pitch_orientation(dense_frames)
         dense_frames = interpolate_player_positions(dense_frames)
+        dense_frames = fill_missing_pitch_positions(dense_frames)
         dense_frames = recompute_possession_for_frames(interpolate_ball_positions(dense_frames))
         if TRACK_DIAGNOSTICS:
             post_ids = [set(player["id"] for player in frame["players"]) for frame in dense_frames]
@@ -1216,7 +1337,9 @@ def analyze_frames(request: AnalyzeFramesRequest) -> dict[str, Any]:
         frames.append(frame)
 
     frames = consolidate_player_teams(frames)
+    frames = stabilize_pitch_orientation(frames)
     frames = interpolate_player_positions(frames)
+    frames = fill_missing_pitch_positions(frames)
     frames = recompute_possession_for_frames(interpolate_ball_positions(frames))
 
     return {

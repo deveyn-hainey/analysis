@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
 import type { AnalyzeEventsRequest, FrameData, MatchEvent, TeamId } from "@/lib/types";
+import { fieldPosition, mapImagePositionToPitch } from "@/lib/pitchMapping";
 
 const EVENT_MODEL = process.env.ANTHROPIC_EVENT_MODEL ?? process.env.ANTHROPIC_SUMMARY_MODEL ?? "claude-sonnet-4-6";
 const EVENT_REVIEW_BATCH_SIZE = 4;
@@ -291,11 +292,13 @@ function synthesizeMovementEvents(frames: FrameData[]): FrameData[] {
   return frames.map((frame, i) => {
     const prev = frames[i - 1];
     const additions: MatchEvent[] = [];
+    const prevBall = prev ? fieldBallPosition(prev) : undefined;
+    const currentBall = fieldBallPosition(frame);
 
-    if (prev && prev.ballPosition && frame.ballPosition) {
+    if (prev && prevBall && currentBall) {
       const distance = Math.hypot(
-        frame.ballPosition.x - prev.ballPosition.x,
-        frame.ballPosition.y - prev.ballPosition.y
+        currentBall.x - prevBall.x,
+        currentBall.y - prevBall.y
       );
       const sameTeamPossession =
         frame.possession !== "contested" &&
@@ -323,7 +326,7 @@ function synthesizeMovementEvents(frames: FrameData[]): FrameData[] {
               : `${team === "home" ? "Home" : "Away"} controlled carry detected from YOLO ball movement`,
           confidence: 0.45,
           isKeyMoment: false,
-          position: frame.ballPosition,
+          position: currentBall,
           evidenceUsed: [`ball moved ${distance.toFixed(1)} pitch units while possession stayed ${frame.possession}`],
           conflicts: ["synthetic event from tracking, not visually verified by Claude"],
           pipelineFlag: "low_confidence",
@@ -351,7 +354,7 @@ function synthesizeMovementEvents(frames: FrameData[]): FrameData[] {
           description: `${team === "home" ? "Home" : "Away"} regain detected from possession change`,
           confidence: 0.42,
           isKeyMoment: false,
-          position: frame.ballPosition,
+          position: currentBall,
           semanticLabel: "high_press_turnover",
           evidenceUsed: [`possession changed from ${prev.possession} to ${frame.possession}`],
           conflicts: ["classified as tackle/turnover from tracking signal"],
@@ -377,19 +380,28 @@ function synthesizeMovementEvents(frames: FrameData[]): FrameData[] {
   });
 }
 
+function fieldBallPosition(frame: FrameData) {
+  return frame.pitchBall ?? (frame.ballPosition ? mapImagePositionToPitch(frame.ballPosition, frame.pitchView) : undefined);
+}
+
+function fieldPlayerPosition(player: FrameData["players"][number], frame: FrameData) {
+  return fieldPosition(player.position, player.pitchPosition, frame.pitchView);
+}
+
 function nearestPlayers(frame: FrameData, count = 4) {
-  if (!frame.ballPosition) return [];
+  const ball = fieldBallPosition(frame);
+  if (!ball) return [];
   return frame.players
-    .map((p) => ({
-      id: p.id,
-      team: p.team,
-      role: p.role,
-      position: p.position,
-      distance: Math.hypot(
-        p.position.x - frame.ballPosition!.x,
-        p.position.y - frame.ballPosition!.y
-      ),
-    }))
+    .map((p) => {
+      const position = fieldPlayerPosition(p, frame);
+      return {
+        id: p.id,
+        team: p.team,
+        role: p.role,
+        position,
+        distance: Math.hypot(position.x - ball.x, position.y - ball.y),
+      };
+    })
     .sort((a, b) => a.distance - b.distance)
     .slice(0, count);
 }
@@ -406,7 +418,7 @@ function candidateWindows(frames: FrameData[]) {
     const frame = frames[i];
     const prev = frames[i - 1];
     const next = frames[i + 1];
-    const ball = frame.ballPosition;
+    const ball = fieldBallPosition(frame);
     const nearest = nearestPlayers(frame, 3);
     const window = {
       start_timestamp: Math.max(0, prev?.timestamp ?? frame.timestamp - 4),
@@ -461,14 +473,17 @@ function candidateWindows(frames: FrameData[]) {
         });
       }
 
-      if (prev?.ballPosition && next?.ballPosition) {
+      const prevBall = prev ? fieldBallPosition(prev) : undefined;
+      const nextBall = next ? fieldBallPosition(next) : undefined;
+
+      if (prevBall && nextBall) {
         const v1 = {
-          x: ball.x - prev.ballPosition.x,
-          y: ball.y - prev.ballPosition.y,
+          x: ball.x - prevBall.x,
+          y: ball.y - prevBall.y,
         };
         const v2 = {
-          x: next.ballPosition.x - ball.x,
-          y: next.ballPosition.y - ball.y,
+          x: nextBall.x - ball.x,
+          y: nextBall.y - ball.y,
         };
         const dot = v1.x * v2.x + v1.y * v2.y;
         const nearBox = ball.x <= 28 || ball.x >= 72;
@@ -486,8 +501,8 @@ function candidateWindows(frames: FrameData[]) {
         }
       }
 
-      if (prev?.ballPosition && frame.possession !== "contested") {
-        const distance = Math.hypot(ball.x - prev.ballPosition.x, ball.y - prev.ballPosition.y);
+      if (prevBall && frame.possession !== "contested") {
+        const distance = Math.hypot(ball.x - prevBall.x, ball.y - prevBall.y);
         if (distance >= DRIBBLE_DISTANCE_THRESHOLD) {
           candidates.push({
             candidate_type: distance >= PASS_DISTANCE_THRESHOLD ? "possible_pass" : "possible_dribble",
@@ -548,9 +563,11 @@ function candidateWindows(frames: FrameData[]) {
       // strong indicator of a goal even when there's no scoreboard and YOLO never
       // placed the ball in the net (common if the goal frame was not sampled or the
       // ball was occluded). We flag it as a candidate so Claude can visually confirm.
-      const nearGoal = (p: { position: { x: number; y: number } }, side: "left" | "right") =>
-        (side === "left" ? p.position.x <= 22 : p.position.x >= 78) &&
-        p.position.y >= 28 && p.position.y <= 72;
+      const nearGoal = (p: FrameData["players"][number], side: "left" | "right") => {
+        const position = fieldPlayerPosition(p, frame);
+        return (side === "left" ? position.x <= 22 : position.x >= 78) &&
+          position.y >= 28 && position.y <= 72;
+      };
 
       for (const side of ["left", "right"] as const) {
         const currCount = frame.players.filter((p) => nearGoal(p, side)).length;
@@ -580,14 +597,14 @@ function candidateWindows(frames: FrameData[]) {
       const playerCountDelta = Math.abs(frame.players.length - prev.players.length);
       const centroid = frame.players.length
         ? {
-            x: frame.players.reduce((sum, player) => sum + player.position.x, 0) / frame.players.length,
-            y: frame.players.reduce((sum, player) => sum + player.position.y, 0) / frame.players.length,
+            x: frame.players.reduce((sum, player) => sum + fieldPlayerPosition(player, frame).x, 0) / frame.players.length,
+            y: frame.players.reduce((sum, player) => sum + fieldPlayerPosition(player, frame).y, 0) / frame.players.length,
           }
         : null;
       const prevCentroid = prev.players.length
         ? {
-            x: prev.players.reduce((sum, player) => sum + player.position.x, 0) / prev.players.length,
-            y: prev.players.reduce((sum, player) => sum + player.position.y, 0) / prev.players.length,
+            x: prev.players.reduce((sum, player) => sum + fieldPlayerPosition(player, prev).x, 0) / prev.players.length,
+            y: prev.players.reduce((sum, player) => sum + fieldPlayerPosition(player, prev).y, 0) / prev.players.length,
           }
         : null;
       const centroidJump = centroid && prevCentroid
@@ -621,6 +638,7 @@ function fallbackEventForCandidate(
   const team = frame.possession === "home" || frame.possession === "away"
     ? frame.possession
     : undefined;
+  const ball = fieldBallPosition(frame);
 
   if (candidate.candidate_type === "possible_goal_or_save") {
     return {
@@ -630,7 +648,7 @@ function fallbackEventForCandidate(
       team,
       description: "Unverified shot/save candidate from YOLO ball location near the goal zone",
       confidence: 0.38,
-      position: frame.ballPosition,
+      position: ball,
       evidence_used: ["YOLO placed the ball in the goal zone", "Claude event review was unavailable for this window"],
       conflicts: ["not confirmed by Claude vision review"],
       pipeline_flag: "low_confidence",
@@ -645,7 +663,7 @@ function fallbackEventForCandidate(
       team,
       description: "Unverified shot candidate from YOLO ball movement in the attacking third",
       confidence: 0.35,
-      position: frame.ballPosition,
+      position: ball,
       evidence_used: ["YOLO attacking-third ball position or direction change", "Claude event review was unavailable for this window"],
       conflicts: ["not confirmed by Claude vision review"],
       pipeline_flag: "low_confidence",
@@ -660,7 +678,7 @@ function fallbackEventForCandidate(
       team,
       description: "Unverified corner/byline restart candidate from YOLO ball location",
       confidence: 0.32,
-      position: frame.ballPosition,
+      position: ball,
       evidence_used: ["YOLO placed the ball near the byline/corner area", "Claude event review was unavailable for this window"],
       conflicts: ["could be corner, goal kick, or open play"],
       pipeline_flag: "low_confidence",
@@ -676,7 +694,7 @@ function fallbackEventForCandidate(
       team,
       description: `Unverified ${type} candidate from YOLO ball progression`,
       confidence: type === "pass" ? 0.42 : 0.4,
-      position: frame.ballPosition,
+      position: ball,
       evidence_used: ["YOLO tracked ball progression while one team retained possession", "Claude event review may not have confirmed this window"],
       conflicts: ["tracking-derived event"],
       pipeline_flag: "low_confidence",
@@ -691,7 +709,7 @@ function fallbackEventForCandidate(
       team,
       description: "Unverified pressure/challenge candidate from players converging near the ball",
       confidence: 0.36,
-      position: frame.ballPosition,
+      position: ball,
       evidence_used: ["YOLO detected nearby opponents around the ball", "Claude event review may not have confirmed this window"],
       conflicts: ["could be pressure, tackle attempt, or normal marking"],
       pipeline_flag: "low_confidence",
@@ -724,7 +742,7 @@ function fallbackEventForCandidate(
       team,
       description: "Unverified possible goal: players clustered near goal zone but no visual confirmation from Claude",
       confidence: 0.4,
-      position: frame.ballPosition,
+      position: ball,
       evidence_used: ["YOLO detected sudden player surge near goal area", "Claude event review was unavailable for this window"],
       conflicts: ["could be a corner, free kick wall, or crowded box — not visually confirmed"],
       pipeline_flag: "low_confidence",
@@ -739,7 +757,7 @@ function fallbackEventForCandidate(
       team,
       description: "Unverified possession turnover candidate from YOLO tracking",
       confidence: 0.34,
-      position: frame.ballPosition,
+      position: ball,
       semantic_label: "high_press_turnover",
       evidence_used: ["YOLO possession estimate changed between sampled frames", "Claude event review was unavailable for this window"],
       conflicts: ["classified as tackle/turnover from tracking signal only"],
@@ -921,6 +939,8 @@ async function reviewFrameBatch(
     timestamp: frame.timestamp,
     possession: frame.possession,
     ballPosition: frame.ballPosition,
+    fieldBallPosition: fieldBallPosition(frame),
+    hasPitchCalibration: Boolean(frame.pitchBall || frame.players.some((p) => p.pitchPosition)),
     playerCount: frame.players.length,
     homePlayers: frame.players.filter((p) => p.team === "home").length,
     awayPlayers: frame.players.filter((p) => p.team === "away").length,

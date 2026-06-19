@@ -25,9 +25,16 @@ export interface SynthesisKeyFrame {
   base64: string;
 }
 
+export interface VisionGoal {
+  timestamp: number;
+  team: "home" | "away";
+  description: string;
+}
+
 export interface VisionSynthesisResult {
   outcome: Omit<OutcomeProjection, "source"> | null;
   summary: string;
+  goals: VisionGoal[];
   insights: CoachingInsight[];
   // Per-shot xG keyed by rounded timestamp (seconds, 1 decimal) so the summarize
   // route can merge it onto the matching shot/goal/save event.
@@ -65,10 +72,14 @@ Return ONLY a single valid JSON object — no markdown, no code fences — with 
   ],
   "shotXg": [
     { "timestamp": <number, matching a provided shot timestamp>, "xg": <number 0-1> }
+  ],
+  "goals": [
+    { "timestamp": <number, the frame where the goal is clearest>, "team": "home" | "away", "description": "<what you see>" }
   ]
 }
 
 Rules:
+- For goals, include an entry ONLY when you can see the ball fully cross the goal line into the net, or an unambiguous goal celebration/kickoff restart. Attribute to the team that scored (the attacking team, not the goalkeeper's team). Be conservative — omit anything uncertain. Use [] when no goal is clearly visible.
 - outcome.homeWin + outcome.draw + outcome.awayWin MUST sum to 100. This is a projection for THIS passage of play, not a full-match prediction — reflect the momentum and chances visible in the clip.
 - Produce 4-5 insights. Prefer observations only the frames reveal (shape, line height, finishing technique) over restating the numbers.
 - For shotXg, only include timestamps present in the SHOTS list below; estimate xG from the visible chance quality (angle, distance, defenders, keeper position). Omit shots you cannot see clearly.`;
@@ -115,6 +126,7 @@ interface RawSynthesis {
   outcome?: { homeWin?: number; draw?: number; awayWin?: number; reasoning?: string };
   insights?: Array<Partial<CoachingInsight>>;
   shotXg?: Array<{ timestamp?: number; xg?: number }>;
+  goals?: Array<{ timestamp?: number; team?: string; description?: string }>;
 }
 
 function normalizeOutcome(raw: RawSynthesis["outcome"]): VisionSynthesisResult["outcome"] {
@@ -182,9 +194,15 @@ export async function runVisionSynthesis(
     .filter((i): i is CoachingInsight => Boolean(i.title && i.observation && i.recommendation && i.category && i.affectedTeam))
     .map((i, idx) => ({ ...i, id: i.id ?? `vi-${idx + 1}` }));
 
+  const goals: VisionGoal[] = (parsed.goals ?? [])
+    .filter((g): g is { timestamp: number; team: "home" | "away"; description?: string } =>
+      typeof g.timestamp === "number" && (g.team === "home" || g.team === "away"))
+    .map((g) => ({ timestamp: g.timestamp, team: g.team, description: (g.description ?? "Goal").trim() }));
+
   return {
     outcome: normalizeOutcome(parsed.outcome),
     summary: (parsed.summary ?? "").trim(),
+    goals,
     insights,
     shotXg,
     usedVision: keyFrames.length > 0,

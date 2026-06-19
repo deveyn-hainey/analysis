@@ -45,7 +45,7 @@ This is a generic COCO model. It can detect people and sports balls, but it is n
 YOLO_MODEL_PATH=/path/to/soccer-best.pt uvicorn app:app --host 0.0.0.0 --port 8001
 ```
 
-This worker is intentionally a starter path: it improves speed and gives the app a real CV layer, but production-quality soccer analytics still needs a soccer-trained detector, tracking, and pitch calibration.
+This worker is intentionally a starter path: it improves speed and gives the app a real CV layer. For production-quality soccer analytics, use a soccer-trained detector and enable the optional pitch calibration layer below.
 
 ## Use a pretrained football model from Hugging Face
 
@@ -104,10 +104,35 @@ pipeline more closely:
 - short ball-detection gaps are linearly interpolated with `YOLO_BALL_INTERPOLATION_LIMIT`
 - tracker IDs keep their previous team assignment when jersey clustering flickers
 
-The biggest remaining difference from `Soccer_Analysis_Model` is pitch homography:
-that repo also uses a keypoint model to project image detections onto true pitch
-coordinates. This worker still emits image-percent coordinates, so tactical views
-will improve further once a keypoint model/homography pass is added.
+## Enable pitch calibration / homography
+
+The worker now mirrors the `Soccer_Analysis_Model` calibration path: a YOLO pose
+model detects 29 soccer field landmarks, then a homography projects players,
+the ball, and referees from broadcast image coordinates onto true pitch
+coordinates. The live video rings still use image-space coordinates; the tactical
+board prefers `pitchPosition` / `pitchBall` / `pitchReferees` when calibration
+succeeds for a frame.
+
+The dependency is included in `requirements.txt`. On first use the keypoint model
+downloads from Hugging Face:
+
+```bash
+KEYPOINT_HF_REPO=Adit-jain/Soccana_Keypoint \
+KEYPOINT_HF_FILENAME=best.pt \
+ENABLE_PITCH_HOMOGRAPHY=1 \
+uvicorn app:app --host 0.0.0.0 --port 8001
+```
+
+If you already downloaded the model, point directly at it:
+
+```bash
+KEYPOINT_MODEL_PATH=/absolute/path/to/keypoint-best.pt \
+ENABLE_PITCH_HOMOGRAPHY=1 \
+uvicorn app:app --host 0.0.0.0 --port 8001
+```
+
+If the `sports` package or keypoint model is unavailable, the worker logs a
+warning and falls back to the existing image-percent coordinates.
 
 ## Fine-tune a soccer detector
 
