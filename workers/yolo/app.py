@@ -48,6 +48,9 @@ CONFIDENCE = float(os.getenv("YOLO_CONFIDENCE", "0.25"))
 # A missed ball starves almost every downstream candidate/event signal, so it gets its
 # own, more permissive threshold instead of sharing the player confidence cutoff.
 BALL_CONFIDENCE = float(os.getenv("YOLO_BALL_CONFIDENCE", "0.1"))
+# Reject ball boxes that are implausibly large for broadcast tracking. This is a
+# fraction of full image area, so 0.003 is ~2,800 px on 1280x720 footage.
+BALL_MAX_AREA_FRAC = float(os.getenv("YOLO_BALL_MAX_AREA_FRAC", "0.003"))
 # Inference resolution for the ultralytics backend. 1280 matches soccana's training
 # imgsz; override down for speed on CPU if a frame is already small, or up for even
 # tinier balls on high-res source video.
@@ -419,6 +422,15 @@ def foot_on_pitch(box: tuple[float, float, float, float], mask: np.ndarray) -> b
     return bool(mask[fy, fx])
 
 
+def point_on_pitch(position: dict[str, float], mask: np.ndarray) -> bool:
+    h, w = mask.shape[:2]
+    px = int((position["x"] / 100.0) * w)
+    py = int((position["y"] / 100.0) * h)
+    px = max(0, min(w - 1, px))
+    py = max(0, min(h - 1, py))
+    return bool(mask[py, px])
+
+
 def filter_persons_to_pitch(
     image: Image.Image,
     detections: list[Detection],
@@ -443,6 +455,42 @@ def filter_persons_to_pitch(
                 continue
         kept.append(d)
     return kept
+
+
+def choose_ball_detection(
+    ball_detections: list[Detection],
+    players: list[dict[str, Any]],
+    width: int,
+    height: int,
+    pitch_mask: Optional[np.ndarray],
+) -> Optional[Detection]:
+    if not ball_detections:
+        return None
+    if pitch_mask is None and REQUIRE_PITCH_VIEW:
+        return None
+
+    image_area = max(1, width * height)
+    candidates: list[tuple[float, Detection]] = []
+    for detection in ball_detections:
+        position = position_from_box(detection.xyxy, width, height)
+        area_frac = box_area(detection.xyxy) / image_area
+        if area_frac > BALL_MAX_AREA_FRAC:
+            continue
+        if pitch_mask is not None and not point_on_pitch(position, pitch_mask):
+            continue
+
+        nearest_player_distance = (
+            min(pitch_distance(position, player["position"]) for player in players)
+            if players
+            else 18.0
+        )
+        area_penalty = max(0.0, area_frac / max(BALL_MAX_AREA_FRAC, 0.0001) - 0.35)
+        score = detection.confidence * 2.0 - nearest_player_distance * 0.015 - area_penalty * 0.35
+        candidates.append((score, detection))
+
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: item[0])[1]
 
 
 def split_teams(features: list[np.ndarray]) -> list[TeamId]:
@@ -690,6 +738,8 @@ def interpolate_ball_positions(frames: list[dict[str, Any]], limit: int = BALL_I
             continue
         gap = end_idx - start_idx - 1
         if gap <= 0 or gap > limit:
+            continue
+        if any(frames[start_idx + offset].get("isPitchView") is False for offset in range(1, gap + 1)):
             continue
         for offset in range(1, gap + 1):
             alpha = offset / (gap + 1)
@@ -1003,8 +1053,8 @@ def analyze_single_frame(raw: RawFrame, frame_index: int) -> dict[str, Any]:
         )
 
     ball_position = None
-    if ball_detections:
-        best_ball = max(ball_detections, key=lambda d: d.confidence)
+    best_ball = choose_ball_detection(ball_detections, players, width, height, pitch_mask)
+    if best_ball:
         ball_position = position_from_box(best_ball.xyxy, width, height)
 
     possession: Union[TeamId, Literal["contested"]] = "contested"
@@ -1042,6 +1092,7 @@ def analyze_precomputed_frame(
     detections: list[Detection],
     teams: list[TeamId],
     is_pitch_view: bool = True,
+    pitch_mask: Optional[np.ndarray] = None,
 ) -> dict[str, Any]:
     width, height = image.size
     person_detections = [
@@ -1073,8 +1124,8 @@ def analyze_precomputed_frame(
         )
 
     ball_position = None
-    if ball_detections:
-        best_ball = max(ball_detections, key=lambda d: d.confidence)
+    best_ball = choose_ball_detection(ball_detections, players, width, height, pitch_mask if is_pitch_view else None)
+    if best_ball:
         ball_position = position_from_box(best_ball.xyxy, width, height)
 
     possession: Union[TeamId, Literal["contested"]] = "contested"
@@ -1218,7 +1269,7 @@ def analyze_video_file(
                 teams = assign_teams(img, person_dets, global_centroids)
 
                 raw = RawFrame(base64="", timestamp=timestamp)
-                frame = analyze_precomputed_frame(raw, output_idx, img, dets, teams, pitch_mask is not None)
+                frame = analyze_precomputed_frame(raw, output_idx, img, dets, teams, pitch_mask is not None, pitch_mask)
                 frame = stabilize_player_ids(frame, tracks, next_ids)
                 if TRACK_DIAGNOSTICS and output_idx % TRACK_DIAGNOSTIC_EVERY == 0:
                     diag = frame.get("_trackingDiagnostics", {})
@@ -1271,7 +1322,7 @@ def analyze_video_file(
                     teams = assign_teams(img, person_dets, global_centroids)
 
                     raw = RawFrame(base64="", timestamp=timestamp)
-                    frame = analyze_precomputed_frame(raw, output_idx, img, dets, teams, pitch_mask is not None)
+                    frame = analyze_precomputed_frame(raw, output_idx, img, dets, teams, pitch_mask is not None, pitch_mask)
                     frame = stabilize_player_ids(frame, tracks, next_ids)
                     frame["possession"] = smooth_possession(frame, previous_possession)
                     previous_possession = frame["possession"]
@@ -1351,7 +1402,7 @@ def analyze_frames(request: AnalyzeFramesRequest) -> dict[str, Any]:
             if d.cls_name in PLAYER_CLASSES and d.cls_name not in REFEREE_CLASSES
         ]
         teams = assign_teams(image, person_detections)
-        frame = analyze_precomputed_frame(raw_frame, i, image, detections, teams, pitch_mask is not None)
+        frame = analyze_precomputed_frame(raw_frame, i, image, detections, teams, pitch_mask is not None, pitch_mask)
         frame = stabilize_player_ids(frame, tracks, next_ids)
         frame["possession"] = smooth_possession(frame, previous_possession)
         previous_possession = frame["possession"]
