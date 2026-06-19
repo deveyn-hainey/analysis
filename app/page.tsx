@@ -235,9 +235,20 @@ async function estimatePitchViews(rawFrames: RawFrame[]): Promise<Map<number, Pi
 
 function attachPitchViews(frames: FrameData[], views: Map<number, PitchView>): FrameData[] {
   if (views.size === 0) return frames;
+  let previous: PitchView | null = null;
   return frames.map((frame, index) => {
     const pitchView = views.get(frame.frameIndex) ?? views.get(index);
-    return pitchView ? { ...frame, pitchView } : frame;
+    if (!pitchView) return frame;
+    const smoothed = previous
+      ? {
+          lengthMin: +(previous.lengthMin * 0.65 + pitchView.lengthMin * 0.35).toFixed(2),
+          lengthMax: +(previous.lengthMax * 0.65 + pitchView.lengthMax * 0.35).toFixed(2),
+          topImageY: +(previous.topImageY * 0.65 + pitchView.topImageY * 0.35).toFixed(2),
+          confidence: pitchView.confidence,
+        }
+      : pitchView;
+    previous = smoothed;
+    return { ...frame, pitchView: smoothed };
   });
 }
 
