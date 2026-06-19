@@ -201,10 +201,6 @@ export interface AnalyzeFrameRequest {
 // Payload for final summarize step
 export interface SummarizeRequest {
   frames: FrameData[];
-  // Dense per-frame tracking for movement-derived metrics: possession, passes,
-  // pass accuracy, distance, spatial occupancy, and average position. Sparse
-  // `frames` remain the source for reviewed events, scoreboard reads, and images.
-  metricFrames?: FrameData[];
   // Warnings from the /api/analyze/events review step (e.g. a batch's Claude call
   // failed and fell back to heuristic-only events) — surfaced to the coach instead
   // of being silently discarded, since it explains why some events lack full review.
