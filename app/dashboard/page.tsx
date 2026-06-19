@@ -148,6 +148,20 @@ function lerpPitchView(a: PitchView, b: PitchView, alpha: number): PitchView {
   };
 }
 
+function pitchViewDelta(a: PitchView, b: PitchView) {
+  return Math.max(
+    Math.abs(a.lengthMin - b.lengthMin),
+    Math.abs(a.lengthMax - b.lengthMax),
+    Math.abs(a.topImageY - b.topImageY)
+  );
+}
+
+function smoothPitchView(previous: PitchView, target: PitchView): PitchView {
+  return pitchViewDelta(previous, target) > 8
+    ? target
+    : lerpPitchView(previous, target, 0.65);
+}
+
 function distance(a: Position, b: Position) {
   return Math.hypot(a.x - b.x, a.y - b.y);
 }
@@ -259,15 +273,15 @@ function easeDisplayedFrame(previous: FrameData | null, target: FrameData): Fram
 
   const ballPosition =
     previous.ballPosition && target.ballPosition
-      ? lerpPosition(previous.ballPosition, target.ballPosition, 0.35)
+      ? lerpPosition(previous.ballPosition, target.ballPosition, distance(previous.ballPosition, target.ballPosition) > 6 ? 0.9 : 0.65)
       : target.ballPosition;
   const pitchBall =
     previous.pitchBall && target.pitchBall
-      ? lerpPosition(previous.pitchBall, target.pitchBall, 0.35)
+      ? lerpPosition(previous.pitchBall, target.pitchBall, distance(previous.pitchBall, target.pitchBall) > 6 ? 0.9 : 0.65)
       : target.pitchBall;
   const pitchView =
     previous.pitchView && target.pitchView
-      ? lerpPitchView(previous.pitchView, target.pitchView, 0.22)
+      ? smoothPitchView(previous.pitchView, target.pitchView)
       : target.pitchView;
 
   return { ...target, players: [...smoothedPlayers, ...coastedPlayers], ballPosition, pitchBall, pitchView };

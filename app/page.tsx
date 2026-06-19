@@ -239,13 +239,22 @@ function attachPitchViews(frames: FrameData[], views: Map<number, PitchView>): F
   return frames.map((frame, index) => {
     const pitchView = views.get(frame.frameIndex) ?? views.get(index);
     if (!pitchView) return frame;
+    const delta = previous
+      ? Math.max(
+          Math.abs(previous.lengthMin - pitchView.lengthMin),
+          Math.abs(previous.lengthMax - pitchView.lengthMax),
+          Math.abs(previous.topImageY - pitchView.topImageY)
+        )
+      : 0;
     const smoothed = previous
-      ? {
-          lengthMin: +(previous.lengthMin * 0.65 + pitchView.lengthMin * 0.35).toFixed(2),
-          lengthMax: +(previous.lengthMax * 0.65 + pitchView.lengthMax * 0.35).toFixed(2),
-          topImageY: +(previous.topImageY * 0.65 + pitchView.topImageY * 0.35).toFixed(2),
-          confidence: pitchView.confidence,
-        }
+      ? delta > 10
+        ? pitchView
+        : {
+            lengthMin: +(previous.lengthMin * 0.4 + pitchView.lengthMin * 0.6).toFixed(2),
+            lengthMax: +(previous.lengthMax * 0.4 + pitchView.lengthMax * 0.6).toFixed(2),
+            topImageY: +(previous.topImageY * 0.4 + pitchView.topImageY * 0.6).toFixed(2),
+            confidence: pitchView.confidence,
+          }
       : pitchView;
     previous = smoothed;
     return { ...frame, pitchView: smoothed };
