@@ -205,23 +205,24 @@ function buildTeamAnalysis(
   id: TeamId,
   frames: FrameData[],
   allEvents: MatchEvent[],
-  scoreboardScore?: { home: number; away: number } | null
+  scoreboardScore?: { home: number; away: number } | null,
+  metricFrames: FrameData[] = frames
 ): TeamAnalysis {
   const teamEvents = allEvents.filter((e) => e.team === id);
 
-  const passStats = countPossessionPasses(frames)[id];
+  const passStats = countPossessionPasses(metricFrames)[id];
   const passEventCount = countEventType(teamEvents, "pass");
   const passCount = Math.max(passEventCount, passStats.completed);
   const shotEvents = shotLikeEvents(teamEvents);
   const shotCount = shotEvents.length;
-  const possessionSampleFrames = frames.filter((f) => f.possession === "home" || f.possession === "away");
+  const possessionSampleFrames = metricFrames.filter((f) => f.possession === "home" || f.possession === "away");
   const possessionFrames = possessionSampleFrames.filter((f) => f.possession === id).length;
   const possession =
     possessionSampleFrames.length > 0
       ? Math.round((possessionFrames / possessionSampleFrames.length) * 100)
       : 50;
 
-  const positions = frames.flatMap((f) =>
+  const positions = metricFrames.flatMap((f) =>
     f.players.filter((p) => p.team === id).map((p) => playerFieldPosition(f, p))
   );
   const avgX = positions.length
@@ -233,7 +234,7 @@ function buildTeamAnalysis(
 
   const passAttempts = Math.max(passCount + passStats.lost, passCount);
   const passAccuracy = passAttempts === 0 ? 0 : Math.round((passCount / passAttempts) * 100);
-  const trackingCoverage = stableTrackingCoverage(frames, id);
+  const trackingCoverage = stableTrackingCoverage(metricFrames, id);
   const expectedGoals = teamExpectedGoals(allEvents, id);
   const verifiedEventShare = teamEvents.length
     ? teamEvents.filter(isVerifiedEvent).length / teamEvents.length
@@ -255,17 +256,17 @@ function buildTeamAnalysis(
       fouls: countEventType(teamEvents, "foul"),
       corners: countEventType(teamEvents, "corner"),
       goals: scoreboardScore ? scoreboardScore[id] : countEventType(teamEvents, "goal"),
-      distanceCovered: calcDistanceCovered(id, frames),
+      distanceCovered: calcDistanceCovered(id, metricFrames),
       expectedGoals,
       metricConfidence: {
-        possession: +(Math.min(0.88, Math.max(0.35, possessionSampleFrames.length / Math.max(frames.length, 1))).toFixed(2)),
+        possession: +(Math.min(0.88, Math.max(0.35, possessionSampleFrames.length / Math.max(metricFrames.length, 1))).toFixed(2)),
         passes: +(Math.min(0.82, 0.35 + verifiedEventShare * 0.42 + trackingCoverage * 0.12).toFixed(2)),
         shots: +(Math.min(0.9, 0.42 + shotEvents.reduce((s, e) => s + e.confidence, 0) / Math.max(shotEvents.length, 1) * 0.45).toFixed(2)),
         xg: +(Math.min(0.86, 0.38 + shotEvents.filter((event) => event.position).length / Math.max(shotEvents.length, 1) * 0.28 + verifiedEventShare * 0.2).toFixed(2)),
         distance: +(Math.min(0.88, Math.max(0.2, trackingCoverage)).toFixed(2)),
       },
     },
-    heatmap: buildHeatmap(id, frames),
+    heatmap: buildHeatmap(id, metricFrames),
   };
 }
 
@@ -521,7 +522,7 @@ export async function POST(req: NextRequest) {
     }
 
     const body = (await req.json()) as SummarizeRequest;
-    const { frames, eventReviewWarnings, keyFrames } = body;
+    const { frames, metricFrames, eventReviewWarnings, keyFrames } = body;
 
     if (!frames || frames.length === 0) {
       return NextResponse.json({ error: "No frames provided." }, { status: 400 });
@@ -539,11 +540,12 @@ export async function POST(req: NextRequest) {
     });
     const eventConflicts = buildEventConflicts(allEvents);
     const scoreboardScore = scoreFromScoreboard(frames);
+    const metricSourceFrames = metricFrames?.length ? metricFrames : frames;
 
     // Team analysis built first to give the synthesis model numeric context.
     // Rebuilt below once vision xG is merged so the displayed team xG reflects it.
-    const homeTeamPre = buildTeamAnalysis("home", frames, allEvents, scoreboardScore);
-    const awayTeamPre = buildTeamAnalysis("away", frames, allEvents, scoreboardScore);
+    const homeTeamPre = buildTeamAnalysis("home", frames, allEvents, scoreboardScore, metricSourceFrames);
+    const awayTeamPre = buildTeamAnalysis("away", frames, allEvents, scoreboardScore, metricSourceFrames);
     const shotEvents = shotLikeEvents(allEvents);
 
     const client = new Anthropic({ apiKey });
@@ -571,8 +573,8 @@ export async function POST(req: NextRequest) {
     keyEvents.push(...buildVisionGoalEvents(synthesis.goals, keyEvents));
     keyEvents.sort((a, b) => a.timestamp - b.timestamp);
 
-    const homeTeam = buildTeamAnalysis("home", frames, keyEvents, scoreboardScore);
-    const awayTeam = buildTeamAnalysis("away", frames, keyEvents, scoreboardScore);
+    const homeTeam = buildTeamAnalysis("home", frames, keyEvents, scoreboardScore, metricSourceFrames);
+    const awayTeam = buildTeamAnalysis("away", frames, keyEvents, scoreboardScore, metricSourceFrames);
 
     const analysis: MatchAnalysis = {
       id: `match-${Date.now()}`,
@@ -587,7 +589,9 @@ export async function POST(req: NextRequest) {
       analysisWarnings: [
         "Replay and broadcast angle changes are flagged when detected, but may still require coach review.",
         "Possession is sampled from frame-level visual evidence, not counted as timeline events.",
-        "Pass accuracy and distance covered are low-confidence: player IDs are assigned per frame, so cross-frame passing and movement can't be tracked reliably from broadcast angle.",
+        metricFrames?.length
+          ? "Movement metrics use dense YOLO tracking; event metrics use reviewed keyframes."
+          : "Movement metrics are preliminary because dense tracking was unavailable; re-run with the YOLO worker for stronger pass, distance, and occupancy data.",
         ...(scoreboardScore ? ["Final score is taken from scoreboard reads; goal timeline only includes score changes observed after the clip baseline."] : []),
         ...(eventReviewWarnings ?? []),
       ],

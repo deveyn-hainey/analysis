@@ -468,34 +468,40 @@ async function reviewEventsWithClaude(
   return { frames: preferScoreboardGoals(withScoreboardGoals), warnings: allWarnings };
 }
 
-// Fire-and-forget: upload the raw video file to the YOLO worker's /analyze-video
-// endpoint and stream the dense per-frame results into denseFrameStore. The user
-// is already on the dashboard by the time this resolves, and the RAF loop there
-// upgrades automatically once the store becomes "ready".
-async function fetchDenseTracking(file: File, matchId: string): Promise<void> {
-  if (!VISION_WORKER_URL) return;
-  matchLibrary.setDense(matchId, [], "loading");
-  try {
-    const form = new FormData();
-    form.append("file", file);
-    form.append("fps", "15");
-    const res = await fetch(`${VISION_WORKER_URL}/analyze-video`, {
-      method: "POST",
-      body: form,
-    });
-    if (!res.ok) {
-      matchLibrary.setDense(matchId, [], "error");
-      return;
-    }
-    const data = (await res.json()) as { frames?: FrameData[] };
-    if (!data.frames || data.frames.length === 0) {
-      matchLibrary.setDense(matchId, [], "error");
-      return;
-    }
-    matchLibrary.setDense(matchId, data.frames, "ready");
-  } catch {
-    matchLibrary.setDense(matchId, [], "error");
-  }
+async function analyzeDenseTracking(file: File): Promise<FrameData[]> {
+  if (!VISION_WORKER_URL) return [];
+  const form = new FormData();
+  form.append("file", file);
+  form.append("fps", "15");
+  const res = await fetch(`${VISION_WORKER_URL}/analyze-video`, {
+    method: "POST",
+    body: form,
+  });
+  if (!res.ok) return [];
+  const data = (await res.json()) as { frames?: FrameData[] };
+  return data.frames ?? [];
+}
+
+function attachNearestPitchViews(
+  frames: FrameData[],
+  views: Map<number, PitchView>,
+  rawFrames: RawFrame[]
+): FrameData[] {
+  if (views.size === 0 || frames.length === 0) return frames;
+  const entries = [...views.entries()]
+    .map(([index, pitchView]) => ({ timestamp: rawFrames[index]?.timestamp ?? index, pitchView }))
+    .sort((a, b) => a.timestamp - b.timestamp);
+  if (entries.length === 0) return frames;
+
+  return frames.map((frame) => {
+    if (frame.pitchView || frame.pitchBall || frame.players.some((player) => player.pitchPosition)) return frame;
+    const nearest = entries.reduce((best, candidate) =>
+      Math.abs(candidate.timestamp - frame.timestamp) < Math.abs(best.timestamp - frame.timestamp)
+        ? candidate
+        : best
+    );
+    return { ...frame, pitchView: nearest.pitchView };
+  });
 }
 
 // Human-friendly label for the match switcher.
@@ -550,6 +556,8 @@ export default function HomePage() {
         setProgress(36);
 
         let analyzedFrames: FrameData[];
+        let denseMetricFrames: FrameData[] = [];
+        let denseStatus: MatchEntry["denseStatus"] = VISION_WORKER_URL ? "loading" : "idle";
         let eventReviewWarnings: string[] = [];
         if (VISION_WORKER_URL) {
           try {
@@ -600,16 +608,37 @@ export default function HomePage() {
         const pitchViews = await estimatePitchViews(rawFrames);
         analyzedFrames = attachPitchViews(analyzedFrames, pitchViews);
 
+        if (VISION_WORKER_URL) {
+          setStatusDetail("Running dense tracking for movement metrics…");
+          setProgress(88);
+          denseMetricFrames = attachNearestPitchViews(
+            await analyzeDenseTracking(file),
+            pitchViews,
+            rawFrames
+          );
+          if (denseMetricFrames.length > 0) {
+            denseStatus = "ready";
+          } else {
+            denseStatus = "error";
+            eventReviewWarnings.push("Dense tracking failed or returned no frames; movement metrics use sparse keyframe data.");
+          }
+        }
+
         setStatus("summarizing");
         setStatusDetail("Building match insights…");
-        setProgress(88);
+        setProgress(92);
 
         const keyFrames = await selectKeyFrames(analyzedFrames, frameImages);
 
         const sumRes = await fetch("/api/analyze/summarize", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ frames: analyzedFrames, eventReviewWarnings, keyFrames }),
+          body: JSON.stringify({
+            frames: analyzedFrames,
+            metricFrames: denseMetricFrames.length ? denseMetricFrames : undefined,
+            eventReviewWarnings,
+            keyFrames,
+          }),
         });
 
         if (!sumRes.ok) {
@@ -627,17 +656,14 @@ export default function HomePage() {
           analysis,
           videoUrl: videoStore.get(),
           frameImages,
-          denseFrames: [],
-          denseStatus: VISION_WORKER_URL ? "loading" : "idle",
+          denseFrames: denseMetricFrames,
+          denseStatus,
           createdAt: Date.now(),
         };
         matchLibrary.add(entry);
 
         setProgress(100);
         setStatus("done");
-        // Kick off dense per-frame tracking in the background — the dashboard
-        // RAF loop will upgrade from sparse interpolation once it resolves.
-        if (VISION_WORKER_URL) fetchDenseTracking(file, entry.id);
         router.push("/dashboard");
       } catch (err) {
         setErrorMsg(err instanceof Error ? err.message : "Something went wrong.");
