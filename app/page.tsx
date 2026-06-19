@@ -261,6 +261,28 @@ function attachPitchViews(frames: FrameData[], views: Map<number, PitchView>): F
   });
 }
 
+function attachNearestPitchViews(
+  frames: FrameData[],
+  views: Map<number, PitchView>,
+  rawFrames: RawFrame[]
+): FrameData[] {
+  if (views.size === 0 || frames.length === 0) return frames;
+  const entries = [...views.entries()]
+    .map(([index, pitchView]) => ({ timestamp: rawFrames[index]?.timestamp ?? index, pitchView }))
+    .sort((a, b) => a.timestamp - b.timestamp);
+  if (entries.length === 0) return frames;
+
+  return frames.map((frame) => {
+    if (frame.pitchView || frame.pitchBall || frame.players.some((player) => player.pitchPosition)) return frame;
+    const nearest = entries.reduce((best, candidate) =>
+      Math.abs(candidate.timestamp - frame.timestamp) < Math.abs(best.timestamp - frame.timestamp)
+        ? candidate
+        : best
+    );
+    return { ...frame, pitchView: nearest.pitchView };
+  });
+}
+
 // Sends scoreboard reads across every frame and synthesises goal events wherever
 // the score increased — matches the server-side logic so cross-batch goals are
 // caught after all client batches have been merged.
@@ -472,7 +494,12 @@ async function reviewEventsWithClaude(
 // endpoint and stream the dense per-frame results into denseFrameStore. The user
 // is already on the dashboard by the time this resolves, and the RAF loop there
 // upgrades automatically once the store becomes "ready".
-async function fetchDenseTracking(file: File, matchId: string): Promise<void> {
+async function fetchDenseTracking(
+  file: File,
+  matchId: string,
+  pitchViews: Map<number, PitchView>,
+  rawFrames: RawFrame[]
+): Promise<void> {
   if (!VISION_WORKER_URL) return;
   matchLibrary.setDense(matchId, [], "loading");
   try {
@@ -492,7 +519,7 @@ async function fetchDenseTracking(file: File, matchId: string): Promise<void> {
       matchLibrary.setDense(matchId, [], "error");
       return;
     }
-    matchLibrary.setDense(matchId, data.frames, "ready");
+    matchLibrary.setDense(matchId, attachNearestPitchViews(data.frames, pitchViews, rawFrames), "ready");
   } catch {
     matchLibrary.setDense(matchId, [], "error");
   }
@@ -637,7 +664,7 @@ export default function HomePage() {
         setStatus("done");
         // Kick off dense per-frame tracking in the background — the dashboard
         // RAF loop will upgrade from sparse interpolation once it resolves.
-        if (VISION_WORKER_URL) fetchDenseTracking(file, entry.id);
+        if (VISION_WORKER_URL) fetchDenseTracking(file, entry.id, pitchViews, rawFrames);
         router.push("/dashboard");
       } catch (err) {
         setErrorMsg(err instanceof Error ? err.message : "Something went wrong.");
