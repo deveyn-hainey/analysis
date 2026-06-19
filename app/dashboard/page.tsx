@@ -243,12 +243,16 @@ function interpolateDenseFrame(frames: FrameData[], timestamp: number): FrameDat
   const next = frames[nextIdx];
   const span = Math.max(0.001, next.timestamp - prev.timestamp);
   const alpha = Math.min(1, Math.max(0, (timestamp - prev.timestamp) / span));
+  if (prev.isPitchView === false || next.isPitchView === false) {
+    return alpha < 0.5 ? prev : next;
+  }
 
   return interpolateFrame(prev, next, alpha);
 }
 
 function easeDisplayedFrame(previous: FrameData | null, target: FrameData): FrameData {
   if (!previous || Math.abs(previous.timestamp - target.timestamp) > 1) return target;
+  const canCoastMissingPlayers = target.isPitchView !== false && target.players.length >= 6;
 
   // Match purely by ID — stable IDs from the worker make this reliable and avoid
   // the contradictory distance thresholds that caused visual jitter before.
@@ -266,10 +270,12 @@ function easeDisplayedFrame(previous: FrameData | null, target: FrameData): Fram
           : player.pitchPosition,
     };
   });
-  const coastedPlayers = previous.players
-    .filter((player) => !targetIds.has(player.id) && /^([ha])\d+$/.test(player.id))
-    .slice(0, 4)
-    .map((player) => ({ ...player, action: "standing" as const }));
+  const coastedPlayers = canCoastMissingPlayers
+    ? previous.players
+        .filter((player) => !targetIds.has(player.id) && /^([ha])\d+$/.test(player.id))
+        .slice(0, 4)
+        .map((player) => ({ ...player, action: "standing" as const }))
+    : [];
 
   const ballPosition =
     previous.ballPosition && target.ballPosition

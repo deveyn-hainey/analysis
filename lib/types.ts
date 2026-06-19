@@ -92,6 +92,9 @@ export interface OutcomeProjection {
 export interface FrameData {
   frameIndex: number;
   timestamp: number;
+  // False for close-ups/replays/cutaways where the worker could not find enough
+  // visible pitch to trust player tracking.
+  isPitchView?: boolean;
   pitchView?: PitchView;
   players: Player[];
   ballPosition?: Position;

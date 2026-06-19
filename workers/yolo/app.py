@@ -371,10 +371,11 @@ PITCH_HSV_UPPER = np.array(
     [int(v) for v in os.getenv("YOLO_PITCH_HSV_UPPER", "95,255,255").split(",")], dtype=np.uint8
 )
 # If the largest green region covers less than this fraction of the frame we
-# assume it isn't a wide pitch shot (replay closeup, goalmouth scramble) and skip
-# filtering entirely rather than risk dropping every real player.
+# assume it isn't a wide pitch shot (replay closeup/cutaway). By default those
+# frames are not trusted for player tracking.
 PITCH_MIN_AREA_FRAC = float(os.getenv("YOLO_PITCH_MIN_AREA_FRAC", "0.10"))
 PITCH_FILTER_ENABLED = os.getenv("YOLO_PITCH_FILTER", "1") not in ("0", "false", "False")
+REQUIRE_PITCH_VIEW = os.getenv("YOLO_REQUIRE_PITCH_VIEW", "1") not in ("0", "false", "False")
 
 
 def compute_pitch_mask(image: Image.Image) -> Optional[np.ndarray]:
@@ -418,7 +419,11 @@ def foot_on_pitch(box: tuple[float, float, float, float], mask: np.ndarray) -> b
     return bool(mask[fy, fx])
 
 
-def filter_persons_to_pitch(image: Image.Image, detections: list[Detection]) -> list[Detection]:
+def filter_persons_to_pitch(
+    image: Image.Image,
+    detections: list[Detection],
+    pitch_mask: Optional[np.ndarray] = None,
+) -> list[Detection]:
     """Drop person detections whose feet aren't on the pitch; keep ball/others as-is.
 
     This is the main defence against over-tracking: a generic COCO model reports
@@ -426,9 +431,11 @@ def filter_persons_to_pitch(image: Image.Image, detections: list[Detection]) -> 
     are what make ByteTrack's IDs churn and the overlay flash. Removing them leaves
     a stable ~22-player set that tracks cleanly.
     """
-    mask = compute_pitch_mask(image)
-    if mask is None:
+    mask = pitch_mask if pitch_mask is not None else compute_pitch_mask(image)
+    if mask is None and not REQUIRE_PITCH_VIEW:
         return detections
+    if mask is None:
+        return [d for d in detections if d.cls_name not in PLAYER_CLASSES and d.cls_name not in REFEREE_CLASSES]
     kept: list[Detection] = []
     for d in detections:
         if d.cls_name in PLAYER_CLASSES and d.cls_name not in BALL_CLASSES:
@@ -790,6 +797,8 @@ def interpolate_player_positions(
             gap = end_idx - start_idx - 1
             if gap <= 0 or gap > limit:
                 continue
+            if any(frames[start_idx + offset].get("isPitchView") is False for offset in range(1, gap + 1)):
+                continue
             for offset in range(1, gap + 1):
                 alpha = offset / (gap + 1)
                 position = lerp_position(start_p["position"], end_p["position"], alpha)
@@ -828,6 +837,8 @@ def fill_missing_pitch_positions(
             gap = end_idx - start_idx - 1
             if gap <= 0 or gap > limit:
                 continue
+            if any(frames[start_idx + offset].get("isPitchView") is False for offset in range(1, gap + 1)):
+                continue
             for offset in range(1, gap + 1):
                 player = next(
                     (p for p in frames[start_idx + offset].get("players", []) if p.get("id") == pid),
@@ -847,6 +858,8 @@ def fill_missing_pitch_positions(
             continue
         gap = end_idx - start_idx - 1
         if gap <= 0 or gap > limit:
+            continue
+        if any(frames[start_idx + offset].get("isPitchView") is False for offset in range(1, gap + 1)):
             continue
         for offset in range(1, gap + 1):
             frame = frames[start_idx + offset]
@@ -958,7 +971,8 @@ def detections_for_ultralytics_result(result: Any) -> list[Detection]:
 def analyze_single_frame(raw: RawFrame, frame_index: int) -> dict[str, Any]:
     image = decode_frame(raw.base64)
     width, height = image.size
-    detections = filter_persons_to_pitch(image, detections_for_image(image))
+    pitch_mask = compute_pitch_mask(image)
+    detections = filter_persons_to_pitch(image, detections_for_image(image), pitch_mask)
 
     person_detections = [
         d for d in detections
@@ -1009,6 +1023,7 @@ def analyze_single_frame(raw: RawFrame, frame_index: int) -> dict[str, Any]:
         "timestamp": raw.timestamp,
         "players": players,
         "ballPosition": ball_position,
+        "isPitchView": pitch_mask is not None,
         "possession": possession,
         "events": [],
     }
@@ -1026,6 +1041,7 @@ def analyze_precomputed_frame(
     image: Image.Image,
     detections: list[Detection],
     teams: list[TeamId],
+    is_pitch_view: bool = True,
 ) -> dict[str, Any]:
     width, height = image.size
     person_detections = [
@@ -1077,6 +1093,7 @@ def analyze_precomputed_frame(
         "timestamp": raw.timestamp,
         "players": players,
         "ballPosition": ball_position,
+        "isPitchView": is_pitch_view,
         "possession": possession,
         "events": [],
     }
@@ -1143,7 +1160,8 @@ def analyze_video_file(
             if not ret:
                 continue
             img = Image.fromarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
-            dets = filter_persons_to_pitch(img, detections_for_image(img))
+            pitch_mask = compute_pitch_mask(img)
+            dets = filter_persons_to_pitch(img, detections_for_image(img), pitch_mask)
             person_dets = [
                 d for d in dets
                 if d.cls_name in PLAYER_CLASSES and d.cls_name not in REFEREE_CLASSES
@@ -1190,7 +1208,8 @@ def analyze_video_file(
             for output_idx, result in enumerate(tracked_results):
                 timestamp = round((output_idx * frame_step) / video_fps, 3)
                 img = Image.fromarray(cv2.cvtColor(result.orig_img, cv2.COLOR_BGR2RGB))
-                dets = filter_persons_to_pitch(img, detections_for_ultralytics_result(result))
+                pitch_mask = compute_pitch_mask(img)
+                dets = filter_persons_to_pitch(img, detections_for_ultralytics_result(result), pitch_mask)
                 person_dets = [
                     d for d in dets
                     if d.cls_name in PLAYER_CLASSES and d.cls_name not in REFEREE_CLASSES
@@ -1199,7 +1218,7 @@ def analyze_video_file(
                 teams = assign_teams(img, person_dets, global_centroids)
 
                 raw = RawFrame(base64="", timestamp=timestamp)
-                frame = analyze_precomputed_frame(raw, output_idx, img, dets, teams)
+                frame = analyze_precomputed_frame(raw, output_idx, img, dets, teams, pitch_mask is not None)
                 frame = stabilize_player_ids(frame, tracks, next_ids)
                 if TRACK_DIAGNOSTICS and output_idx % TRACK_DIAGNOSTIC_EVERY == 0:
                     diag = frame.get("_trackingDiagnostics", {})
@@ -1243,7 +1262,8 @@ def analyze_video_file(
                 if frame_idx % frame_step == 0:
                     timestamp = round(frame_idx / video_fps, 3)
                     img = Image.fromarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
-                    dets = filter_persons_to_pitch(img, detections_for_image(img))
+                    pitch_mask = compute_pitch_mask(img)
+                    dets = filter_persons_to_pitch(img, detections_for_image(img), pitch_mask)
                     person_dets = [
                         d for d in dets
                         if d.cls_name in PLAYER_CLASSES and d.cls_name not in REFEREE_CLASSES
@@ -1251,7 +1271,7 @@ def analyze_video_file(
                     teams = assign_teams(img, person_dets, global_centroids)
 
                     raw = RawFrame(base64="", timestamp=timestamp)
-                    frame = analyze_precomputed_frame(raw, output_idx, img, dets, teams)
+                    frame = analyze_precomputed_frame(raw, output_idx, img, dets, teams, pitch_mask is not None)
                     frame = stabilize_player_ids(frame, tracks, next_ids)
                     frame["possession"] = smooth_possession(frame, previous_possession)
                     previous_possession = frame["possession"]
@@ -1324,13 +1344,14 @@ def analyze_frames(request: AnalyzeFramesRequest) -> dict[str, Any]:
     previous_possession: Union[TeamId, Literal["contested"]] = "contested"
     for i, raw_frame in enumerate(request.frames):
         image = decode_frame(raw_frame.base64)
-        detections = filter_persons_to_pitch(image, detections_for_image(image))
+        pitch_mask = compute_pitch_mask(image)
+        detections = filter_persons_to_pitch(image, detections_for_image(image), pitch_mask)
         person_detections = [
             d for d in detections
             if d.cls_name in PLAYER_CLASSES and d.cls_name not in REFEREE_CLASSES
         ]
         teams = assign_teams(image, person_detections)
-        frame = analyze_precomputed_frame(raw_frame, i, image, detections, teams)
+        frame = analyze_precomputed_frame(raw_frame, i, image, detections, teams, pitch_mask is not None)
         frame = stabilize_player_ids(frame, tracks, next_ids)
         frame["possession"] = smooth_possession(frame, previous_possession)
         previous_possession = frame["possession"]
