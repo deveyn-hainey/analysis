@@ -31,6 +31,11 @@ _MODEL_PATH = os.getenv("KEYPOINT_MODEL_PATH", "").strip()
 _HF_REPO = os.getenv("KEYPOINT_HF_REPO", "Adit-jain/Soccana_Keypoint")
 _HF_FILE = os.getenv("KEYPOINT_HF_FILENAME", "Model/weights/best.pt")
 _CONF = float(os.getenv("KEYPOINT_CONFIDENCE", "0.5"))
+# The keypoint model costs ~4x the detector per frame, but the camera barely
+# moves between consecutive dense-tracking frames. Recompute the homography
+# only every Nth call and reuse the cached transformer in between. Set to 1 to
+# recalibrate every frame.
+_RECALIBRATE_EVERY = max(1, int(os.getenv("KEYPOINT_EVERY_N_FRAMES", "3")))
 
 # Maps our 29 field keypoints (keypoint_constants order) to the sports-lib pitch
 # vertex indices. Copied verbatim from
@@ -54,6 +59,8 @@ class _Projector:
         self._pitch_length = 12000.0  # cm (sports SoccerPitchConfiguration)
         self._pitch_width = 7000.0
         self.available = False
+        self._cached_transformer = None
+        self._calls_since_calibration = 0
 
     def _ensure(self) -> None:
         if self._tried:
@@ -94,18 +101,9 @@ class _Projector:
         if not self.available or points_px is None or len(points_px) == 0:
             return None
         try:
-            result = self._model.predict(image, verbose=False, conf=0.1)[0]
-            keypoints = getattr(result, "keypoints", None)
-            if keypoints is None or keypoints.data is None or len(keypoints.data) == 0:
+            transformer = self._get_transformer(image)
+            if transformer is None:
                 return None
-            detected = keypoints.data.cpu().numpy()[0]  # (29, 3): x, y, confidence
-            mask = detected[:, 2] > _CONF
-            if int(mask.sum()) < 4:
-                return None  # need 4+ landmarks for a homography
-
-            frame_points = detected[mask, :2].astype(np.float32)
-            pitch_points = self._all_pitch_points[_OUR_TO_SPORTS[mask]].astype(np.float32)
-            transformer = self._view_transformer_cls(source=frame_points, target=pitch_points)
             projected = transformer.transform_points(points=np.asarray(points_px, dtype=np.float32))
             if projected is None:
                 return None
@@ -117,6 +115,33 @@ class _Projector:
         except Exception as exc:
             logger.debug("pitch projection failed for a frame: %s", exc)
             return None
+
+    def _get_transformer(self, image):
+        """Return a frame→pitch ViewTransformer, recalibrating every Nth call."""
+        self._calls_since_calibration += 1
+        if (
+            self._cached_transformer is not None
+            and self._calls_since_calibration < _RECALIBRATE_EVERY
+        ):
+            return self._cached_transformer
+        self._calls_since_calibration = 0
+
+        from . import models as _models
+        result = self._model.predict(image, verbose=False, conf=0.1, device=_models.DEVICE)[0]
+        keypoints = getattr(result, "keypoints", None)
+        if keypoints is None or keypoints.data is None or len(keypoints.data) == 0:
+            self._cached_transformer = None
+            return None
+        detected = keypoints.data.cpu().numpy()[0]  # (29, 3): x, y, confidence
+        mask = detected[:, 2] > _CONF
+        if int(mask.sum()) < 4:
+            self._cached_transformer = None  # need 4+ landmarks for a homography
+            return None
+
+        frame_points = detected[mask, :2].astype(np.float32)
+        pitch_points = self._all_pitch_points[_OUR_TO_SPORTS[mask]].astype(np.float32)
+        self._cached_transformer = self._view_transformer_cls(source=frame_points, target=pitch_points)
+        return self._cached_transformer
 
 
 _projector = _Projector()

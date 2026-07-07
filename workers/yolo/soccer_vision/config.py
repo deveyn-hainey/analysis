@@ -41,6 +41,8 @@ BALL_CONFIDENCE = float(os.getenv("YOLO_BALL_CONFIDENCE", "0.1"))
 # 1280 matches soccana's training imgsz; Ultralytics' 640 default silently
 # downscales the already-tiny ball before the model ever sees it.
 IMAGE_SIZE = int(os.getenv("YOLO_IMGSZ", "1280"))
+# Inference device: "auto" picks cuda > mps (Apple Silicon GPU) > cpu.
+DEVICE = os.getenv("YOLO_DEVICE", "auto").lower()
 
 # ── Class name mapping ───────────────────────────────────────────────────────
 PLAYER_CLASSES = {name.strip().lower() for name in os.getenv("YOLO_PLAYER_CLASSES", "person,player,goalkeeper").split(",")}

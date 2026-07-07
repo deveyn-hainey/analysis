@@ -15,6 +15,25 @@ from . import config
 from .config import logger
 
 
+def resolve_device() -> str:
+    if config.DEVICE != "auto":
+        return config.DEVICE
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            return "cuda"
+        if torch.backends.mps.is_available():
+            return "mps"
+    except Exception:
+        pass
+    return "cpu"
+
+
+DEVICE = resolve_device()
+logger.info("inference device: %s", DEVICE)
+
+
 def use_huggingface_yolov5() -> bool:
     if config.MODEL_BACKEND == "yolov5":
         return True

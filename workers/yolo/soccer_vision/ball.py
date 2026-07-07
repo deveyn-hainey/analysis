@@ -109,6 +109,7 @@ class BallTracker:
                 source=np.asarray(crop),
                 conf=config.BALL_CONFIDENCE * 0.8,
                 imgsz=640,
+                device=models.DEVICE,
                 verbose=False,
             )[0]
         except Exception as exc:

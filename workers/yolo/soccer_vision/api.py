@@ -132,6 +132,7 @@ def analyze_video_file(
                 tracker=config.TRACKER_CONFIG,
                 conf=min(config.CONFIDENCE, config.BALL_CONFIDENCE),
                 imgsz=config.IMAGE_SIZE,
+                device=models.DEVICE,
                 vid_stride=frame_step,
                 verbose=False,
             )

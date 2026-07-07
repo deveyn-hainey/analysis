@@ -53,6 +53,7 @@ def detections_for_image(image: Image.Image) -> list[Detection]:
         source=np.asarray(image),
         conf=min(config.CONFIDENCE, config.BALL_CONFIDENCE),
         imgsz=config.IMAGE_SIZE,
+        device=models.DEVICE,
         verbose=False,
     )[0]
     names = result.names
