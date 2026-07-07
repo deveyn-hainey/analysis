@@ -127,7 +127,11 @@ class _Projector:
         self._calls_since_calibration = 0
 
         from . import models as _models
-        result = self._model.predict(image, verbose=False, conf=0.1, device=_models.DEVICE)[0]
+        # Pose models have a known keypoint-corruption bug on Apple MPS
+        # (ultralytics#4031) — keep calibration on CPU there; the transformer
+        # cache makes the cost negligible.
+        device = "cpu" if _models.DEVICE == "mps" else _models.DEVICE
+        result = self._model.predict(image, verbose=False, conf=0.1, device=device)[0]
         keypoints = getattr(result, "keypoints", None)
         if keypoints is None or keypoints.data is None or len(keypoints.data) == 0:
             self._cached_transformer = None
