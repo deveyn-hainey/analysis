@@ -893,6 +893,8 @@ function DashboardContent() {
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [denseFrames, setDenseFrames] = useState<import("@/lib/types").FrameData[]>([]);
   const [denseStatus, setDenseStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [denseProgress, setDenseProgress] = useState<import("@/lib/denseFrameStore").DenseProgress | null>(null);
+  const [denseError, setDenseError] = useState<string | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const liveFrameRef = useRef<FrameData | null>(null);
   const loadedIdRef = useRef<string | null>(null);
@@ -931,6 +933,8 @@ function DashboardContent() {
     const sync = () => {
       setDenseFrames(denseFrameStore.getFrames());
       setDenseStatus(denseFrameStore.getStatus());
+      setDenseProgress(denseFrameStore.getProgress());
+      setDenseError(denseFrameStore.getError());
     };
     sync(); // read current state immediately
     return denseFrameStore.subscribe(sync);
@@ -1075,7 +1079,21 @@ function DashboardContent() {
               <span>Player rings and field sync to playback in real time</span>
               {denseStatus === "loading" && (
                 <span className="rounded-full border border-yellow-400/30 bg-yellow-400/10 px-2 py-0.5 text-yellow-300 animate-pulse">
-                  Dense tracking loading
+                  {denseProgress
+                    ? `Dense tracking — ${denseProgress.stage}${
+                        denseProgress.percent != null && denseProgress.stage === "tracking"
+                          ? ` ${denseProgress.percent}% (${denseProgress.framesDone}/${denseProgress.framesTotal})`
+                          : ""
+                      }`
+                    : "Dense tracking loading"}
+                </span>
+              )}
+              {denseStatus === "error" && (
+                <span
+                  className="rounded-full border border-red-400/30 bg-red-400/10 px-2 py-0.5 text-red-300"
+                  title={denseError ?? undefined}
+                >
+                  Dense tracking failed{denseError ? ` — ${denseError}` : ""}
                 </span>
               )}
               {denseStatus === "ready" && (

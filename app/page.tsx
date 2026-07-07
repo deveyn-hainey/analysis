@@ -490,28 +490,74 @@ async function reviewEventsWithClaude(
 async function fetchDenseTracking(file: File, matchId: string, kitConfig: KitConfig): Promise<void> {
   if (!VISION_WORKER_URL) return;
   matchLibrary.setDense(matchId, [], "loading");
+  const fail = (error: string) => {
+    console.error(`dense tracking failed: ${error}`);
+    matchLibrary.setDense(matchId, [], "error", { error });
+  };
   try {
     const form = new FormData();
     form.append("file", file);
     form.append("fps", "15");
     form.append("homeKitColor", kitConfig.homeKitColor);
     form.append("awayKitColor", kitConfig.awayKitColor);
-    const res = await fetch(`${VISION_WORKER_URL}/analyze-video`, {
-      method: "POST",
-      body: form,
-    });
-    if (!res.ok) {
-      matchLibrary.setDense(matchId, [], "error");
-      return;
+    const res = await fetch(`${VISION_WORKER_URL}/analyze-video`, { method: "POST", body: form });
+    if (!res.ok) return fail(`worker rejected upload (HTTP ${res.status})`);
+    const { jobId } = (await res.json()) as { jobId?: string };
+    if (!jobId) return fail("worker returned no job ID — is it running the latest code?");
+
+    // Poll job progress. The worker heartbeats updatedAt on every frame, so a
+    // stalled job (no update for 90s) is distinguishable from a slow one.
+    let lastUpdatedAt = 0;
+    let stalledSince: number | null = null;
+    for (;;) {
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+      let status: {
+        status: string;
+        stage: string;
+        framesDone: number;
+        framesTotal: number;
+        percent: number | null;
+        error?: string;
+        updatedAt: number;
+      };
+      try {
+        const poll = await fetch(`${VISION_WORKER_URL}/jobs/${jobId}`);
+        if (poll.status === 404) return fail("worker restarted mid-job — re-upload the video");
+        if (!poll.ok) return fail(`progress poll failed (HTTP ${poll.status})`);
+        status = await poll.json();
+      } catch {
+        return fail("lost connection to the vision worker");
+      }
+
+      if (status.status === "error") return fail(status.error ?? "analysis failed on the worker");
+      if (status.status === "done") break;
+
+      if (status.updatedAt !== lastUpdatedAt) {
+        lastUpdatedAt = status.updatedAt;
+        stalledSince = null;
+      } else {
+        stalledSince = stalledSince ?? Date.now();
+        if (Date.now() - stalledSince > 90_000) {
+          return fail(`worker stalled during "${status.stage}" at frame ${status.framesDone}/${status.framesTotal}`);
+        }
+      }
+      matchLibrary.setDense(matchId, [], "loading", {
+        progress: {
+          stage: status.stage,
+          framesDone: status.framesDone,
+          framesTotal: status.framesTotal,
+          percent: status.percent,
+        },
+      });
     }
-    const data = (await res.json()) as { frames?: FrameData[] };
-    if (!data.frames || data.frames.length === 0) {
-      matchLibrary.setDense(matchId, [], "error");
-      return;
-    }
+
+    const resultRes = await fetch(`${VISION_WORKER_URL}/jobs/${jobId}/result`);
+    if (!resultRes.ok) return fail(`could not fetch result (HTTP ${resultRes.status})`);
+    const data = (await resultRes.json()) as { frames?: FrameData[] };
+    if (!data.frames || data.frames.length === 0) return fail("worker returned zero frames");
     matchLibrary.setDense(matchId, data.frames, "ready");
-  } catch {
-    matchLibrary.setDense(matchId, [], "error");
+  } catch (err) {
+    fail(err instanceof Error ? err.message : "unexpected error");
   }
 }
 

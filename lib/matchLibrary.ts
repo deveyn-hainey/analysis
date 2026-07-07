@@ -1,4 +1,5 @@
 import type { FrameData, MatchAnalysis } from "@/lib/types";
+import type { DenseProgress } from "@/lib/denseFrameStore";
 import { videoStore } from "@/lib/videoStore";
 import { frameImageStore } from "@/lib/frameImageStore";
 import { denseFrameStore } from "@/lib/denseFrameStore";
@@ -93,15 +94,20 @@ export const matchLibrary = {
 
   // Background dense-tracking result for a specific match. Only touches the shared
   // dense buffer when that match is the one currently being viewed.
-  setDense(id: string, frames: FrameData[], status: DenseStatus) {
+  setDense(
+    id: string,
+    frames: FrameData[],
+    status: DenseStatus,
+    detail?: { progress?: DenseProgress | null; error?: string }
+  ) {
     const entry = _entries.find((e) => e.id === id);
     if (!entry) return;
     entry.denseFrames = status === "ready" ? withNearestPitchViews(frames, entry.analysis.frames) : frames;
     entry.denseStatus = status;
     if (_activeId === id) {
       if (status === "ready") denseFrameStore.setReady(entry.denseFrames);
-      else if (status === "loading") denseFrameStore.setLoading();
-      else if (status === "error") denseFrameStore.setError();
+      else if (status === "loading") denseFrameStore.setLoading(detail?.progress);
+      else if (status === "error") denseFrameStore.setError(detail?.error);
       else denseFrameStore.clear();
     }
     notify();

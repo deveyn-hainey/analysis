@@ -1,10 +1,13 @@
 """FastAPI app: HTTP wiring only — all vision logic lives in the sibling modules."""
 import os
 import tempfile
+import threading
+import time
+import traceback
 from typing import Any, Literal, Optional, Union
 
 import cv2
-from fastapi import FastAPI, File, Form, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
 
@@ -15,6 +18,7 @@ from .ball import BallTracker
 from .config import logger
 from .detection import decode_frame, detections_for_image, detections_for_ultralytics_result, split_detections
 from .frames import analyze_precomputed_frame
+from .jobs import Job, create_job, get_job
 from .pitch_mask import compute_pitch_mask, filter_persons_to_pitch
 from .postprocess import run_postprocessing
 from .schemas import AnalyzeFramesRequest, RawFrame, TeamId, TrackState
@@ -30,6 +34,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# The dense pass is CPU/GPU-bound and stateful (one tracker per video); run one
+# at a time so two uploads don't interleave and double the wall-clock of both.
+_dense_semaphore = threading.Semaphore(1)
+
 
 @app.get("/health")
 def health() -> dict[str, Any]:
@@ -39,50 +47,37 @@ def health() -> dict[str, Any]:
     return {
         "status": "ok",
         "model": config.MODEL_PATH or "soccana (default)",
+        "device": models.DEVICE,
         "pitchHomography": _projector.available,
     }
 
 
-@app.post("/analyze-video")
-def analyze_video_file(
-    file: UploadFile = File(...),
-    fps: float = Form(default=config.DEFAULT_DENSE_FPS),
-    homeKitColor: Optional[str] = Form(default=None),
-    awayKitColor: Optional[str] = Form(default=None),
+def _run_dense_analysis(
+    tmp_path: str,
+    fps: float,
+    home_kit_color: str,
+    away_kit_color: str,
+    job: Job,
 ) -> dict[str, Any]:
-    """Accept a raw video file and return dense per-frame tracking data.
-
-    Two-pass approach:
-    1. Sample ~30 evenly-spaced frames to establish stable global team-colour
-       centroids (avoids the per-frame flickering that happens when a single
-       unbalanced frame shifts the brightness-split clustering).
-    2. Extract frames at `fps` and classify every player using the global
-       centroids, returning the dense FrameData array.
-    """
-    suffix = "." + (file.filename.rsplit(".", 1)[-1] if file.filename and "." in file.filename else "mp4")
-    content = file.file.read()
-    home_kit_color, away_kit_color = request_kit_colors(homeKitColor, awayKitColor)
-
-    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-        tmp.write(content)
-        tmp_path = tmp.name
-
+    """The dense two-pass video analysis. Reports progress via `job`."""
     try:
         cap = cv2.VideoCapture(tmp_path)
         if not cap.isOpened():
-            return {"error": "Could not open video", "frames": []}
+            raise ValueError("Could not open video")
 
         video_fps: float = cap.get(cv2.CAP_PROP_FPS) or 30.0
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         frame_step = max(1, round(video_fps / fps))
+        expected_output = max(1, total_frames // frame_step)
 
         logger.info(
-            "analyze-video: %.1ffps video, target %.1ffps, step=%d, %d total → ~%d output frames, kits home=%s away=%s",
-            video_fps, fps, frame_step, total_frames, max(1, total_frames // frame_step),
+            "job %s: %.1ffps video, target %.1ffps, step=%d, %d total → ~%d output frames, kits home=%s away=%s",
+            job.id, video_fps, fps, frame_step, total_frames, expected_output,
             home_kit_color or "auto", away_kit_color or "auto",
         )
 
         # ── Pass 1: calibration — pool colours from ~30 spread-out frames ──────
+        job.update(stage="calibrating", frames_done=0, frames_total=expected_output)
         n_cal = 30
         cal_step = max(1, total_frames // n_cal)
         cal_indices = list(range(0, total_frames, cal_step))[:n_cal]
@@ -98,8 +93,8 @@ def analyze_video_file(
             dets = filter_persons_to_pitch(img, detections_for_image(img), pitch_mask)
             person_dets, _, _ = split_detections(dets)
             all_cal_features.extend(crop_jersey_features(img, d.xyxy) for d in person_dets)
+            job.update()  # heartbeat so a calibration stall is visible
 
-        # Build fixed centroids; fall back to per-frame clustering if too few players found.
         global_centroids: Optional[tuple[np.ndarray, np.ndarray]] = None
         if len(all_cal_features) >= 4:
             cal_teams = split_teams(all_cal_features)
@@ -111,18 +106,18 @@ def analyze_video_file(
                     np.stack(away_feats).mean(axis=0),
                 )
                 logger.info(
-                    "analyze-video: global HSV centroids built — home n=%d, away n=%d",
-                    len(home_feats), len(away_feats),
+                    "job %s: global HSV centroids built — home n=%d, away n=%d",
+                    job.id, len(home_feats), len(away_feats),
                 )
 
         # ── Pass 2: dense tracking at target fps ────────────────────────────────
+        job.update(stage="tracking")
         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
         dense_frames: list[dict[str, Any]] = []
         ball_tracker = BallTracker()
         tracks: dict[TeamId, list[TrackState]] = {"home": [], "away": []}
         next_ids: dict[TeamId, int] = {"home": 0, "away": 0}
         previous_possession: Union[TeamId, Literal["contested"]] = "contested"
-        previous_diag_ids: set[str] = set()
 
         if not models.use_huggingface_yolov5():
             tracked_results = models.model.track(
@@ -143,42 +138,19 @@ def analyze_video_file(
                 pitch_mask = compute_pitch_mask(img)
                 dets = filter_persons_to_pitch(img, detections_for_ultralytics_result(result), pitch_mask)
                 person_dets, _, _ = split_detections(dets)
-                tracker_ids = [d.tracker_id for d in person_dets if d.tracker_id is not None]
                 teams = assign_teams(img, person_dets, global_centroids, home_kit_color, away_kit_color)
 
                 raw = RawFrame(base64="", timestamp=timestamp)
                 frame = analyze_precomputed_frame(raw, output_idx, img, dets, teams, pitch_mask is not None, pitch_mask, ball_tracker)
                 frame = stabilize_player_ids(frame, tracks, next_ids)
-                if config.TRACK_DIAGNOSTICS and output_idx % config.TRACK_DIAGNOSTIC_EVERY == 0:
-                    diag = frame.get("_trackingDiagnostics", {})
-                    current_ids = set(diag.get("stableIds", []))
-                    logger.info(
-                        "track-diag frame=%04d t=%.2fs persons=%d bytetrack_unique=%d matched=%d new=%d raw=%d kept=%d home=%d away=%d dropped=%d id_added=%d id_lost=%d",
-                        output_idx,
-                        timestamp,
-                        len(person_dets),
-                        len(set(tracker_ids)),
-                        diag.get("matchedExisting", 0),
-                        diag.get("createdTracks", 0),
-                        diag.get("rawPlayers", 0),
-                        diag.get("postPrunePlayers", 0),
-                        diag.get("homeCount", 0),
-                        diag.get("awayCount", 0),
-                        diag.get("droppedByPrune", 0),
-                        len(current_ids - previous_diag_ids),
-                        len(previous_diag_ids - current_ids),
-                    )
-                    previous_diag_ids = current_ids
                 frame.pop("_trackingDiagnostics", None)
                 frame["possession"] = smooth_possession(frame, previous_possession)
                 previous_possession = frame["possession"]
                 dense_frames.append(frame)
+                job.update(frames_done=output_idx + 1)
 
                 if (output_idx + 1) % 50 == 0:
-                    logger.info(
-                        "analyze-video: %d / ~%d frames processed",
-                        output_idx + 1, max(1, total_frames // frame_step),
-                    )
+                    logger.info("job %s: %d / ~%d frames processed", job.id, output_idx + 1, expected_output)
         else:
             frame_idx = 0
             output_idx = 0
@@ -203,24 +175,18 @@ def analyze_video_file(
                     previous_possession = frame["possession"]
                     dense_frames.append(frame)
                     output_idx += 1
+                    job.update(frames_done=output_idx)
 
                     if output_idx % 50 == 0:
-                        logger.info(
-                            "analyze-video: %d / ~%d frames processed",
-                            output_idx, max(1, total_frames // frame_step),
-                        )
+                        logger.info("job %s: %d / ~%d frames processed", job.id, output_idx, expected_output)
 
                 frame_idx += 1
 
         cap.release()
-        if config.TRACK_DIAGNOSTICS:
-            _log_id_stability("pre-postprocess", dense_frames)
+        job.update(stage="postprocessing")
         dense_frames = run_postprocessing(dense_frames)
-        if config.TRACK_DIAGNOSTICS:
-            _log_id_stability("postprocess", dense_frames)
-        logger.info("analyze-video: complete — %d dense frames", len(dense_frames))
+        logger.info("job %s: complete — %d dense frames", job.id, len(dense_frames))
         return {"frames": dense_frames, "videoFps": video_fps, "targetFps": fps}
-
     finally:
         try:
             os.unlink(tmp_path)
@@ -228,21 +194,79 @@ def analyze_video_file(
             pass
 
 
-def _log_id_stability(stage: str, frames: list[dict[str, Any]]) -> None:
-    id_sets = [set(player["id"] for player in frame["players"]) for frame in frames]
-    avg_kept = sum(len(ids) for ids in id_sets) / max(len(id_sets), 1)
-    avg_delta = sum(
-        len(id_sets[i] ^ id_sets[i - 1])
-        for i in range(1, len(id_sets))
-    ) / max(len(id_sets) - 1, 1)
+def _dense_worker(tmp_path: str, fps: float, home: str, away: str, job: Job) -> None:
+    with _dense_semaphore:
+        job.update(status="running", stage="starting")
+        try:
+            result = _run_dense_analysis(tmp_path, fps, home, away, job)
+            job.update(status="done", stage="done", result=result, finished_at=time.time())
+        except Exception as exc:
+            logger.error("job %s failed: %s\n%s", job.id, exc, traceback.format_exc())
+            job.update(status="error", stage="error", error=str(exc), finished_at=time.time())
+
+
+@app.post("/analyze-video")
+def analyze_video_file(
+    file: UploadFile = File(...),
+    fps: float = Form(default=config.DEFAULT_DENSE_FPS),
+    homeKitColor: Optional[str] = Form(default=None),
+    awayKitColor: Optional[str] = Form(default=None),
+    sync: bool = Form(default=False),
+) -> dict[str, Any]:
+    """Kick off dense video analysis and return a job ID immediately.
+
+    Poll GET /jobs/{jobId} for stage + frame progress, then fetch
+    GET /jobs/{jobId}/result when status is "done". Pass sync=true to block
+    until completion and get the result inline (old behaviour, useful for
+    curl/scripts).
+    """
+    suffix = "." + (file.filename.rsplit(".", 1)[-1] if file.filename and "." in file.filename else "mp4")
+    content = file.file.read()
+    home_kit_color, away_kit_color = request_kit_colors(homeKitColor, awayKitColor)
+
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        tmp.write(content)
+        tmp_path = tmp.name
+
+    job = create_job()
     logger.info(
-        "track-diag %s summary frames=%d avg_kept=%.2f avg_id_delta=%.2f unique_ids=%d",
-        stage,
-        len(frames),
-        avg_kept,
-        avg_delta,
-        len(set().union(*id_sets)) if id_sets else 0,
+        "job %s: accepted %s (%.1f MB), fps=%.1f, sync=%s",
+        job.id, file.filename, len(content) / 1e6, fps, sync,
     )
+
+    if sync:
+        _dense_worker(tmp_path, fps, home_kit_color, away_kit_color, job)
+        if job.status == "error":
+            return {"error": job.error, "frames": []}
+        return job.result or {"frames": []}
+
+    thread = threading.Thread(
+        target=_dense_worker,
+        args=(tmp_path, fps, home_kit_color, away_kit_color, job),
+        daemon=True,
+    )
+    thread.start()
+    return job.to_status_dict()
+
+
+@app.get("/jobs/{job_id}")
+def job_status(job_id: str) -> dict[str, Any]:
+    job = get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="unknown job (worker restarted?) — re-upload the video")
+    return job.to_status_dict()
+
+
+@app.get("/jobs/{job_id}/result")
+def job_result(job_id: str) -> dict[str, Any]:
+    job = get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="unknown job (worker restarted?) — re-upload the video")
+    if job.status == "error":
+        raise HTTPException(status_code=500, detail=job.error or "analysis failed")
+    if job.status != "done" or job.result is None:
+        raise HTTPException(status_code=409, detail=f"job not finished (status={job.status})")
+    return job.result
 
 
 @app.post("/analyze-frames")
