@@ -6,14 +6,15 @@ interface Props {
   base64: string;
   players: Player[];
   ballPosition?: Position;
+  referees?: Position[];
 }
 
 const DOT_COLOR: Record<string, string> = {
-  home: "#4ade80",
-  away: "#ef4444",
+  home: "#ef4444",
+  away: "#3b82f6",
 };
 
-export default function FrameOverlay({ base64, players, ballPosition }: Props) {
+export default function FrameOverlay({ base64, players, ballPosition, referees }: Props) {
   const homeCount = players.filter((p) => p.team === "home").length;
   const awayCount = players.filter((p) => p.team === "away").length;
 
@@ -25,47 +26,53 @@ export default function FrameOverlay({ base64, players, ballPosition }: Props) {
           alt="Extracted match frame"
           className="w-full block"
         />
-        {/* SVG overlay — viewBox matches the 640×360 extracted frame dimensions */}
+        {/* SVG overlay — viewBox matches the 1280×720 extracted frame dimensions */}
         <svg
           className="absolute inset-0 w-full h-full pointer-events-none"
-          viewBox="0 0 640 360"
+          viewBox="0 0 1280 720"
           preserveAspectRatio="none"
         >
           {players.map((p) => {
-            const cx = (p.position.x / 100) * 640;
-            const cy = (p.position.y / 100) * 360;
+            const cx = (p.position.x / 100) * 1280;
+            const cy = (p.position.y / 100) * 720;
             const fill = DOT_COLOR[p.team] ?? "#ffffff";
             return (
               <g key={p.id}>
-                <circle
-                  cx={cx}
-                  cy={cy}
-                  r={10}
+                <path
+                  d={`M ${cx - 24} ${cy + 18} A 24 8 0 0 0 ${cx + 24} ${cy + 18}`}
                   fill={fill}
-                  fillOpacity={0.82}
+                  fillOpacity={0}
                   stroke="#000"
-                  strokeWidth={1.5}
+                  strokeWidth={4}
+                  strokeOpacity={0.55}
+                  strokeLinecap="round"
                 />
-                {p.number > 0 && (
-                  <text
-                    x={cx}
-                    y={cy + 3.5}
-                    textAnchor="middle"
-                    fontSize={8}
-                    fontWeight="700"
-                    fill="#000"
-                    fontFamily="monospace"
-                  >
-                    {p.number}
-                  </text>
-                )}
+                <path
+                  d={`M ${cx - 24} ${cy + 18} A 24 8 0 0 0 ${cx + 24} ${cy + 18}`}
+                  fill="none"
+                  stroke={fill}
+                  strokeWidth={2.5}
+                  strokeLinecap="round"
+                />
               </g>
             );
           })}
+          {referees?.map((pos, i) => (
+            <circle
+              key={`ref-${i}`}
+              cx={(pos.x / 100) * 1280}
+              cy={(pos.y / 100) * 720}
+              r={8}
+              fill="#1a1a1a"
+              fillOpacity={0.85}
+              stroke="#fbbf24"
+              strokeWidth={2}
+            />
+          ))}
           {ballPosition && (
             <circle
-              cx={(ballPosition.x / 100) * 640}
-              cy={(ballPosition.y / 100) * 360}
+              cx={(ballPosition.x / 100) * 1280}
+              cy={(ballPosition.y / 100) * 720}
               r={6}
               fill="#fbbf24"
               stroke="#000"
@@ -85,6 +92,12 @@ export default function FrameOverlay({ base64, players, ballPosition }: Props) {
           <span className="w-2.5 h-2.5 rounded-full bg-red-500 inline-block" />
           Away ({awayCount})
         </span>
+        {referees && referees.length > 0 && (
+          <span className="flex items-center gap-1.5">
+            <span className="w-2.5 h-2.5 rounded-full bg-black border border-yellow-400 inline-block" />
+            Referee ({referees.length})
+          </span>
+        )}
         {ballPosition && (
           <span className="flex items-center gap-1.5">
             <span className="w-2.5 h-2.5 rounded-full bg-yellow-400 inline-block" />

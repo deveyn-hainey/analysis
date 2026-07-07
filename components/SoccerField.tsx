@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import type { FrameData, Player } from "@/lib/types";
+import { fieldPosition, hasPitchCalibration, mapImagePositionToPitch } from "@/lib/pitchMapping";
 
 interface SoccerFieldProps {
   frame: FrameData;
@@ -29,6 +30,9 @@ const ACTION_COLORS: Partial<Record<Player["action"], string>> = {
 export default function SoccerField({ frame }: SoccerFieldProps) {
   const [hovered, setHovered] = useState<string | null>(null);
   const hoveredPlayer = frame.players.find((p) => p.id === hovered);
+  const calibrated = hasPitchCalibration(frame);
+  const ball = frame.pitchBall ?? (frame.ballPosition ? mapImagePositionToPitch(frame.ballPosition, frame.pitchView) : null);
+  const referees = frame.pitchReferees ?? frame.referees?.map((pos) => mapImagePositionToPitch(pos, frame.pitchView));
 
   return (
     <div className="relative w-full">
@@ -70,19 +74,35 @@ export default function SoccerField({ frame }: SoccerFieldProps) {
         <path d={`M ${W - 8},8 A 16,16 0 0,0 ${W - 24},8`} fill="none" stroke="white" strokeWidth={1.5} opacity={0.5} />
         <path d={`M ${W - 8},${H - 8} A 16,16 0 0,1 ${W - 24},${H - 8}`} fill="none" stroke="white" strokeWidth={1.5} opacity={0.5} />
 
+        {/* Referees */}
+        {referees?.map((pos, i) => {
+          return (
+          <circle
+            key={`ref-${i}`}
+            cx={px(pos.x)}
+            cy={py(pos.y)}
+            r={6}
+            fill="#1a1a1a"
+            stroke="#fbbf24"
+            strokeWidth={1.5}
+          />
+          );
+        })}
+
         {/* Ball */}
-        {frame.ballPosition && (
+        {ball && (
           <g>
-            <circle cx={px(frame.ballPosition.x)} cy={py(frame.ballPosition.y)} r={8} fill="white" stroke="#d97706" strokeWidth={2} />
-            <circle cx={px(frame.ballPosition.x)} cy={py(frame.ballPosition.y)} r={3} fill="#d97706" />
+            <circle cx={px(ball.x)} cy={py(ball.y)} r={5.5} fill="white" stroke="#d97706" strokeWidth={1.75} />
+            <circle cx={px(ball.x)} cy={py(ball.y)} r={2.25} fill="#d97706" />
           </g>
         )}
 
         {/* Players */}
         {frame.players.map((player) => {
-          const x = px(player.position.x);
-          const y = py(player.position.y);
-          const color = player.team === "home" ? "#3b82f6" : "#ef4444";
+          const pos = fieldPosition(player.position, player.pitchPosition, frame.pitchView);
+          const x = px(pos.x);
+          const y = py(pos.y);
+          const color = player.team === "home" ? "#ef4444" : "#3b82f6";
           const accent = ACTION_COLORS[player.action];
           const isHovered = hovered === player.id;
 
@@ -93,21 +113,9 @@ export default function SoccerField({ frame }: SoccerFieldProps) {
               onMouseLeave={() => setHovered(null)}
               style={{ cursor: "pointer" }}
             >
-              {isHovered && <circle cx={x} cy={y} r={18} fill={color} opacity={0.15} />}
-              {accent && <circle cx={x} cy={y} r={14} fill="none" stroke={accent} strokeWidth={2} opacity={0.8} />}
-              <circle cx={x} cy={y} r={11} fill={color} stroke="white" strokeWidth={1.5} />
-              <text
-                x={x}
-                y={y}
-                textAnchor="middle"
-                dominantBaseline="central"
-                fill="white"
-                fontSize={8}
-                fontWeight="bold"
-                fontFamily="system-ui"
-              >
-                {player.number}
-              </text>
+              {isHovered && <circle cx={x} cy={y} r={12} fill={color} opacity={0.15} />}
+              {accent && <circle cx={x} cy={y} r={9} fill="none" stroke={accent} strokeWidth={1.5} opacity={0.8} />}
+              <circle cx={x} cy={y} r={6.5} fill={color} stroke="white" strokeWidth={1.25} />
             </g>
           );
         })}
@@ -119,7 +127,7 @@ export default function SoccerField({ frame }: SoccerFieldProps) {
           <div className="flex items-center gap-2 mb-1">
             <div
               className="w-3 h-3 rounded-full"
-              style={{ backgroundColor: hoveredPlayer.team === "home" ? "#3b82f6" : "#ef4444" }}
+              style={{ backgroundColor: hoveredPlayer.team === "home" ? "#ef4444" : "#3b82f6" }}
             />
             <span className="font-semibold text-[#f0fdf4]">
               #{hoveredPlayer.number} · {ROLE_LABELS[hoveredPlayer.role]}
@@ -135,17 +143,28 @@ export default function SoccerField({ frame }: SoccerFieldProps) {
       {/* Legend */}
       <div className="absolute bottom-4 right-4 flex items-center gap-4 bg-[#070e07]/80 border border-[#1c3020] rounded-lg px-3 py-2 text-xs">
         <div className="flex items-center gap-1.5">
-          <div className="w-3 h-3 rounded-full bg-blue-500" />
+          <div className="w-3 h-3 rounded-full bg-red-500" />
           <span className="text-[#6b9e6b]">Home</span>
         </div>
         <div className="flex items-center gap-1.5">
-          <div className="w-3 h-3 rounded-full bg-red-500" />
+          <div className="w-3 h-3 rounded-full bg-blue-500" />
           <span className="text-[#6b9e6b]">Away</span>
         </div>
         <div className="flex items-center gap-1.5">
           <div className="w-3 h-3 rounded-full bg-white border-2 border-amber-500" />
           <span className="text-[#6b9e6b]">Ball</span>
         </div>
+        {frame.referees && frame.referees.length > 0 && (
+          <div className="flex items-center gap-1.5">
+            <div className="w-3 h-3 rounded-full bg-black border-2 border-yellow-400" />
+            <span className="text-[#6b9e6b]">Ref</span>
+          </div>
+        )}
+        {!calibrated && frame.pitchView && (
+          <div className="hidden sm:flex items-center gap-1.5 text-[#829086]">
+            <span>View map</span>
+          </div>
+        )}
       </div>
     </div>
   );

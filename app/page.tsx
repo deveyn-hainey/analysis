@@ -14,19 +14,50 @@ import {
   Cpu,
   BarChart3,
 } from "lucide-react";
-import type { AnalyzeFrameRequest, FrameData, MatchAnalysis } from "@/lib/types";
+import type { AnalyzeEventsRequest, AnalyzeFrameRequest, FrameData, MatchAnalysis, MatchEvent, PitchView } from "@/lib/types";
 import { videoStore } from "@/lib/videoStore";
-import { frameImageStore } from "@/lib/frameImageStore";
+import { matchLibrary, type MatchEntry } from "@/lib/matchLibrary";
 
 const ACCEPTED_TYPES = ["video/mp4", "video/webm", "video/ogg", "video/quicktime"];
-const FRAME_ANALYSIS_CONCURRENCY = 2;
+const FRAME_ANALYSIS_CONCURRENCY = 4;
 const MAX_FRAME_RETRIES = 1;
 const MAX_FAILED_FRAME_RATIO = 0.3;
+const SEND_PREVIOUS_FRAME_CONTEXT = false;
+const VISION_WORKER_URL = process.env.NEXT_PUBLIC_VISION_WORKER_URL?.replace(/\/$/, "");
+// 4 frames per request keeps each Claude call under ~20s (vs 50-60s with 8 frames).
+// Smaller batches also mean smaller JSON responses so max_tokens can stay lower.
+const EVENT_REVIEW_CLIENT_BATCH = 4;
+// 4 concurrent requests: with 4-frame batches a 40-frame clip becomes 10 batches
+// → 3 rounds of 4 parallel calls → ~60s total vs ~175s with the old 8-frame/2-concurrent setup.
+const EVENT_REVIEW_CLIENT_CONCURRENCY = 4;
 
 type RawFrame = { base64: string; timestamp: number };
+type KitColor = "auto" | "white" | "blue" | "red" | "navy" | "black" | "yellow" | "orange" | "green" | "purple";
+type KitConfig = { homeKitColor: KitColor; awayKitColor: KitColor };
+
+const KIT_COLORS: Array<{ value: KitColor; label: string; swatch?: string }> = [
+  { value: "auto", label: "Auto" },
+  { value: "white", label: "White", swatch: "#f8fafc" },
+  { value: "blue", label: "Blue", swatch: "#3b82f6" },
+  { value: "red", label: "Red", swatch: "#ef4444" },
+  { value: "navy", label: "Navy", swatch: "#1e3a8a" },
+  { value: "black", label: "Black", swatch: "#111827" },
+  { value: "yellow", label: "Yellow", swatch: "#facc15" },
+  { value: "orange", label: "Orange", swatch: "#fb923c" },
+  { value: "green", label: "Green", swatch: "#22c55e" },
+  { value: "purple", label: "Purple", swatch: "#a855f7" },
+];
+
+type PitchViewResponse = {
+  views?: Array<{ timestamp: number; pitchView: PitchView | null }>;
+};
 
 function frameInterval(durationSeconds: number): number {
-  return Math.max(2, Math.min(8, Math.round(durationSeconds / 16)));
+  // 6s cap for longer clips: a 2:30 video → 25 frames (vs 38 at 4s cap).
+  // Fewer frames = fewer Claude batches = meaningfully faster total processing.
+  // Goal sequences (kick + net + celebration) span ~3-4s so a 6s interval will
+  // still catch either the action frame or the immediate celebration frame.
+  return Math.max(2, Math.min(6, Math.round(durationSeconds / 20)));
 }
 
 function extractFrames(
@@ -50,8 +81,13 @@ function extractFrames(
         timestamps.push(+t.toFixed(1));
       }
 
-      canvas.width = 640;
-      canvas.height = 360;
+      // 640×360 was throwing away exactly the resolution needed to see the ball:
+      // a ball that's ~15px wide in a 1920×1080 broadcast source shrinks to ~5px,
+      // well below what any detector (YOLO or Claude) can reliably pick out — and
+      // the soccana model was trained at 1280px besides. Every "ball not detected"
+      // review note traces back to this.
+      canvas.width = 1280;
+      canvas.height = 720;
 
       let idx = 0;
       const seekNext = () => {
@@ -63,8 +99,8 @@ function extractFrames(
       };
 
       video.onseeked = () => {
-        ctx.drawImage(video, 0, 0, 640, 360);
-        const base64 = canvas.toDataURL("image/jpeg", 0.7).split(",")[1];
+        ctx.drawImage(video, 0, 0, 1280, 720);
+        const base64 = canvas.toDataURL("image/jpeg", 0.85).split(",")[1];
         frames.push({ base64, timestamp: timestamps[idx] });
         onProgress?.(Math.round(((idx + 1) / timestamps.length) * 30));
         idx++;
@@ -144,8 +180,8 @@ async function analyzeFrames(
         base64: rawFrame.base64,
         timestamp: rawFrame.timestamp,
         frameIndex: i,
-        prevBase64: prev?.base64,
-        prevTimestamp: prev?.timestamp,
+        prevBase64: SEND_PREVIOUS_FRAME_CONTEXT ? prev?.base64 : undefined,
+        prevTimestamp: SEND_PREVIOUS_FRAME_CONTEXT ? prev?.timestamp : undefined,
       };
 
       try {
@@ -169,6 +205,325 @@ async function analyzeFrames(
   };
 }
 
+async function analyzeFramesWithWorker(rawFrames: RawFrame[], kitConfig: KitConfig): Promise<FrameData[]> {
+  if (!VISION_WORKER_URL) {
+    throw new Error("Vision worker is not configured");
+  }
+
+  const res = await fetch(`${VISION_WORKER_URL}/analyze-frames`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ frames: rawFrames, ...kitConfig }),
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: "Vision worker analysis failed" }));
+    throw new Error((err as { error?: string }).error ?? "Vision worker analysis failed");
+  }
+
+  const data = (await res.json()) as { frames?: FrameData[] };
+  if (!data.frames || data.frames.length === 0) {
+    throw new Error("Vision worker returned no frames");
+  }
+
+  return data.frames;
+}
+
+async function estimatePitchViews(rawFrames: RawFrame[]): Promise<Map<number, PitchView>> {
+  try {
+    const res = await fetch("/api/analyze/pitch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ frames: rawFrames }),
+    });
+    if (!res.ok) return new Map();
+    const data = (await res.json()) as PitchViewResponse;
+    const views = new Map<number, PitchView>();
+    data.views?.forEach((entry, index) => {
+      if (entry.pitchView) views.set(index, entry.pitchView);
+    });
+    return views;
+  } catch {
+    return new Map();
+  }
+}
+
+function attachPitchViews(frames: FrameData[], views: Map<number, PitchView>): FrameData[] {
+  if (views.size === 0) return frames;
+  let previous: PitchView | null = null;
+  return frames.map((frame, index) => {
+    const pitchView = views.get(frame.frameIndex) ?? views.get(index);
+    if (!pitchView) return frame;
+    const delta = previous
+      ? Math.max(
+          Math.abs(previous.lengthMin - pitchView.lengthMin),
+          Math.abs(previous.lengthMax - pitchView.lengthMax),
+          Math.abs(previous.topImageY - pitchView.topImageY)
+        )
+      : 0;
+    const smoothed = previous
+      ? delta > 10
+        ? pitchView
+        : {
+            lengthMin: +(previous.lengthMin * 0.4 + pitchView.lengthMin * 0.6).toFixed(2),
+            lengthMax: +(previous.lengthMax * 0.4 + pitchView.lengthMax * 0.6).toFixed(2),
+            topImageY: +(previous.topImageY * 0.4 + pitchView.topImageY * 0.6).toFixed(2),
+            confidence: pitchView.confidence,
+          }
+      : pitchView;
+    previous = smoothed;
+    return { ...frame, pitchView: smoothed };
+  });
+}
+
+// Sends scoreboard reads across every frame and synthesises goal events wherever
+// the score increased — matches the server-side logic so cross-batch goals are
+// caught after all client batches have been merged.
+function synthesizeGoalsFromScoreboard(frames: FrameData[]): FrameData[] {
+  const sorted = [...frames].sort((a, b) => a.timestamp - b.timestamp);
+  const runningMax: Record<string, number> = { home: 0, away: 0 };
+  let hasBaseline = false;
+  const additions = new Map<number, MatchEvent[]>();
+
+  for (const frame of sorted) {
+    if (!frame.scoreboard) continue;
+
+    if (!hasBaseline) {
+      runningMax.home = Math.max(0, frame.scoreboard.home);
+      runningMax.away = Math.max(0, frame.scoreboard.away);
+      hasBaseline = true;
+      continue;
+    }
+
+    for (const team of ["home", "away"] as const) {
+      const seen = frame.scoreboard![team];
+      if (typeof seen === "number" && Number.isFinite(seen) && seen > runningMax[team]) {
+        const previous = runningMax[team];
+        const ev: MatchEvent = {
+          id: `f${frame.frameIndex}-scoreboard-goal-${team}-${seen}`,
+          timestamp: frame.timestamp,
+          type: "goal",
+          team,
+          description: `Scoreboard read ${frame.scoreboard!.home}-${frame.scoreboard!.away} — ${team === "home" ? "Home" : "Away"} goal confirmed from score overlay`,
+          confidence: 0.92,
+          isKeyMoment: true,
+          evidenceUsed: [`scoreboard read ${seen} for ${team}, up from ${previous} previously observed after the clip baseline`],
+          source: "scoreboard",
+        };
+        additions.set(frame.frameIndex, [...(additions.get(frame.frameIndex) ?? []), ev]);
+        runningMax[team] = seen;
+      }
+    }
+  }
+
+  if (additions.size === 0) return frames;
+  return frames.map((f) =>
+    additions.has(f.frameIndex)
+      ? { ...f, events: deduplicateEvents([...f.events, ...additions.get(f.frameIndex)!]) }
+      : f
+  );
+}
+
+function deduplicateEvents(events: MatchEvent[]): MatchEvent[] {
+  const seen = new Set<string>();
+  return events.filter((e) => {
+    if (seen.has(e.id)) return false;
+    seen.add(e.id);
+    return true;
+  });
+}
+
+// When a scoreboard is readable anywhere in the clip, it is the ground truth for
+// goals. Visual/cluster-based goal detections are kept only when there is no
+// scoreboard at all — otherwise they double-count (one from Claude review, one from
+// scoreboard synthesis) and inflate the score.
+function preferScoreboardGoals(frames: FrameData[]): FrameData[] {
+  const hasScoreboard = frames.some((f) => f.scoreboard != null);
+  if (!hasScoreboard) return frames; // no scoreboard anywhere — keep visual goals as-is
+
+  return frames.map((f) => ({
+    ...f,
+    events: f.events.filter(
+      (e) => e.type !== "goal" || e.id.includes("-scoreboard-goal-")
+    ),
+  }));
+}
+
+// Resize frames to a smaller resolution for event review. Claude doesn't need
+// full 1280×720 to detect celebrations, ball-in-net, or player actions — and
+// sending half-resolution images cuts Claude payload size by ~60%.
+function resizeFramesForReview(
+  frames: RawFrame[],
+  width = 640,
+  height = 360,
+  quality = 0.75
+): Promise<RawFrame[]> {
+  // Each frame gets its own canvas — sharing one canvas across concurrent onload
+  // callbacks causes them to overwrite each other mid-draw, producing corrupt images.
+  return Promise.all(
+    frames.map(
+      (f) =>
+        new Promise<RawFrame>((resolve) => {
+          const canvas = document.createElement("canvas");
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext("2d")!;
+          const img = new Image();
+          img.onload = () => {
+            ctx.drawImage(img, 0, 0, width, height);
+            resolve({
+              base64: canvas.toDataURL("image/jpeg", quality).split(",")[1],
+              timestamp: f.timestamp,
+            });
+          };
+          img.src = `data:image/jpeg;base64,${f.base64}`;
+        })
+    )
+  );
+}
+
+// Frames the vision synthesis pass should actually look at. Event types that
+// carry the most tactical signal — goals, shots, saves, set pieces, cards.
+const KEY_EVENT_TYPES = new Set<MatchEvent["type"]>([
+  "goal", "shot", "save", "corner", "freekick", "card_yellow", "card_red", "card_unknown",
+]);
+const KEY_FRAME_TARGET = 12;
+
+// Curate the frames sent to /summarize for vision synthesis: every frame that
+// contains a key event, topped up with evenly-spaced frames so the model sees
+// build-up play and tactical shape, not just the moments around events. Frames
+// are downsized (640×360) to keep the multi-image payload small.
+async function selectKeyFrames(analyzed: FrameData[], frameImages: Map<number, string>): Promise<RawFrame[]> {
+  if (analyzed.length === 0) return [];
+
+  const chosen = new Map<number, number>(); // frameIndex -> timestamp
+  for (const f of analyzed) {
+    if (f.events.some((e) => KEY_EVENT_TYPES.has(e.type))) chosen.set(f.frameIndex, f.timestamp);
+  }
+
+  if (chosen.size < KEY_FRAME_TARGET) {
+    const need = KEY_FRAME_TARGET - chosen.size;
+    const step = Math.max(1, Math.floor(analyzed.length / (need + 1)));
+    for (let i = 0; i < analyzed.length && chosen.size < KEY_FRAME_TARGET; i += step) {
+      const f = analyzed[i];
+      if (!chosen.has(f.frameIndex)) chosen.set(f.frameIndex, f.timestamp);
+    }
+  }
+
+  const raw = [...chosen.entries()]
+    .sort((a, b) => a[1] - b[1])
+    .slice(0, KEY_FRAME_TARGET)
+    .map(([index, timestamp]) => {
+      const base64 = frameImages.get(index);
+      return base64 ? { base64, timestamp } : null;
+    })
+    .filter((x): x is RawFrame => x !== null);
+
+  return resizeFramesForReview(raw);
+}
+
+async function reviewEventsWithClaude(
+  rawFrames: RawFrame[],
+  frames: FrameData[],
+  onProgress?: (completed: number, total: number) => void
+): Promise<{ frames: FrameData[]; warnings: string[] }> {
+  // Downscale images before sending — Claude needs enough detail to see
+  // celebrations and ball-in-net, but not full 1280×720 YOLO resolution.
+  // 960×540 at 0.78 quality cuts payload ~60% and speeds up each API call.
+  const reviewImages = await resizeFramesForReview(rawFrames);
+
+  const totalBatches = Math.ceil(reviewImages.length / EVENT_REVIEW_CLIENT_BATCH);
+  const allWarnings: string[] = [];
+  const resultFrames: FrameData[] = [...frames];
+  let nextBatch = 0;
+
+  async function worker() {
+    while (nextBatch < totalBatches) {
+      const batchIdx = nextBatch++;
+      const start = batchIdx * EVENT_REVIEW_CLIENT_BATCH;
+      const batchImages = reviewImages.slice(start, start + EVENT_REVIEW_CLIENT_BATCH);
+      const batchFrames = frames.slice(start, start + EVENT_REVIEW_CLIENT_BATCH);
+
+      const payload: AnalyzeEventsRequest = { images: batchImages, frames: batchFrames };
+
+      try {
+        const res = await fetch("/api/analyze/events", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+
+        if (res.ok) {
+          const data = (await res.json()) as { frames?: FrameData[]; warnings?: string[] };
+          if (data.frames) {
+            data.frames.forEach((frame, i) => { resultFrames[start + i] = frame; });
+          }
+          if (data.warnings) allWarnings.push(...data.warnings);
+        } else {
+          const err = await res.json().catch(() => ({ error: "Event review failed" }));
+          allWarnings.push(`Batch ${batchIdx + 1}/${totalBatches} failed: ${(err as { error?: string }).error ?? "unknown error"}`);
+        }
+      } catch (err) {
+        allWarnings.push(`Batch ${batchIdx + 1}/${totalBatches} failed: ${err instanceof Error ? err.message : "unknown"}`);
+      }
+
+      onProgress?.(batchIdx + 1, totalBatches);
+    }
+  }
+
+  const concurrency = Math.min(EVENT_REVIEW_CLIENT_CONCURRENCY, totalBatches);
+  await Promise.all(Array.from({ length: concurrency }, () => worker()));
+
+  // Global scoreboard synthesis across all merged frames catches cross-batch goals
+  // (e.g. goal happened in batch 1 frames but scoreboard only visible in batch 2).
+  const withScoreboardGoals = synthesizeGoalsFromScoreboard(resultFrames);
+
+  // If a scoreboard was readable anywhere, it is the ground truth — remove visual
+  // goal events so they don't double-count alongside scoreboard-synthesized ones.
+  return { frames: preferScoreboardGoals(withScoreboardGoals), warnings: allWarnings };
+}
+
+// Fire-and-forget: upload the raw video file to the YOLO worker's /analyze-video
+// endpoint and stream the dense per-frame results into denseFrameStore. The user
+// is already on the dashboard by the time this resolves, and the RAF loop there
+// upgrades automatically once the store becomes "ready".
+async function fetchDenseTracking(file: File, matchId: string, kitConfig: KitConfig): Promise<void> {
+  if (!VISION_WORKER_URL) return;
+  matchLibrary.setDense(matchId, [], "loading");
+  try {
+    const form = new FormData();
+    form.append("file", file);
+    form.append("fps", "15");
+    form.append("homeKitColor", kitConfig.homeKitColor);
+    form.append("awayKitColor", kitConfig.awayKitColor);
+    const res = await fetch(`${VISION_WORKER_URL}/analyze-video`, {
+      method: "POST",
+      body: form,
+    });
+    if (!res.ok) {
+      matchLibrary.setDense(matchId, [], "error");
+      return;
+    }
+    const data = (await res.json()) as { frames?: FrameData[] };
+    if (!data.frames || data.frames.length === 0) {
+      matchLibrary.setDense(matchId, [], "error");
+      return;
+    }
+    matchLibrary.setDense(matchId, data.frames, "ready");
+  } catch {
+    matchLibrary.setDense(matchId, [], "error");
+  }
+}
+
+// Human-friendly label for the match switcher.
+function deriveMatchTitle(analysis: MatchAnalysis): string {
+  const home = analysis.homeTeam.name?.trim();
+  const away = analysis.awayTeam.name?.trim();
+  const generic = (n?: string) => !n || /^(home|away)( team)?$/i.test(n);
+  if (!generic(home) && !generic(away)) return `${home} vs ${away}`;
+  return "Untitled match";
+}
+
 export default function HomePage() {
   const router = useRouter();
   const [dragOver, setDragOver] = useState(false);
@@ -176,6 +531,8 @@ export default function HomePage() {
   const [progress, setProgress] = useState(0);
   const [statusDetail, setStatusDetail] = useState("");
   const [errorMsg, setErrorMsg] = useState("");
+  const [homeKitColor, setHomeKitColor] = useState<KitColor>("white");
+  const [awayKitColor, setAwayKitColor] = useState<KitColor>("blue");
 
   const handleFile = useCallback(
     async (file: File) => {
@@ -190,6 +547,7 @@ export default function HomePage() {
       setStatusDetail("Reading video…");
 
       try {
+        const kitConfig: KitConfig = { homeKitColor, awayKitColor };
         const rawFrames = await extractFrames(file, (pct) => {
           setProgress(5 + pct);
           setStatusDetail("Capturing keyframes…");
@@ -199,40 +557,79 @@ export default function HomePage() {
           throw new Error("No frames could be extracted from this video. Please try a longer clip.");
         }
 
-        // Store images so the dashboard can render actual-frame overlays
-        frameImageStore.clear();
-        rawFrames.forEach((f, i) => frameImageStore.set(i, f.base64));
+        // Per-match frame images so the dashboard can render actual-frame overlays.
+        const frameImages = new Map<number, string>();
+        rawFrames.forEach((f, i) => frameImages.set(i, f.base64));
 
         setStatus("analyzing");
-        setStatusDetail(`Analysing ${rawFrames.length} frames with AI…`);
+        setStatusDetail(
+          VISION_WORKER_URL
+            ? `Analysing ${rawFrames.length} frames with YOLO worker…`
+            : `Analysing ${rawFrames.length} frames with AI…`
+        );
         setProgress(36);
 
-        const { frames: analyzedFrames, failed } = await analyzeFrames(
-          rawFrames,
-          (completed, failedFrames) => {
-            setProgress(36 + Math.round((completed / rawFrames.length) * 50));
-            setStatusDetail(
-              failedFrames > 0
-                ? `Analysed ${completed} of ${rawFrames.length} frames (${failedFrames} retried and skipped)…`
-                : `Analysed ${completed} of ${rawFrames.length} frames…`
+        let analyzedFrames: FrameData[];
+        let eventReviewWarnings: string[] = [];
+        if (VISION_WORKER_URL) {
+          try {
+            analyzedFrames = await analyzeFramesWithWorker(rawFrames, kitConfig);
+            setProgress(72);
+            setStatusDetail("Reviewing YOLO detections for match events…");
+            const totalBatches = Math.ceil(rawFrames.length / EVENT_REVIEW_CLIENT_BATCH);
+            const reviewed = await reviewEventsWithClaude(
+              rawFrames,
+              analyzedFrames,
+              (completed, total) => {
+                setProgress(72 + Math.round((completed / total) * 14));
+                setStatusDetail(`Reviewing events: batch ${completed}/${total}…`);
+              }
+            );
+            analyzedFrames = reviewed.frames;
+            eventReviewWarnings = reviewed.warnings;
+            setProgress(86);
+            setStatusDetail(`Reviewed ${analyzedFrames.length} frames across ${totalBatches} batches…`);
+          } catch (err) {
+            const detail = err instanceof Error ? err.message : "Unknown worker error";
+            throw new Error(
+              `YOLO worker failed at ${VISION_WORKER_URL}. Make sure the worker terminal is still running, then retry. Details: ${detail}`
             );
           }
-        );
-
-        if (failed / rawFrames.length > MAX_FAILED_FRAME_RATIO) {
-          throw new Error(
-            `AI analysis failed for ${failed} of ${rawFrames.length} frames. Please try again with a shorter or clearer clip.`
+        } else {
+          const claudeResult = await analyzeFrames(
+            rawFrames,
+            (completed, failedFrames) => {
+              setProgress(36 + Math.round((completed / rawFrames.length) * 50));
+              setStatusDetail(
+                failedFrames > 0
+                  ? `Analysed ${completed} of ${rawFrames.length} frames (${failedFrames} retried and skipped)…`
+                  : `Analysed ${completed} of ${rawFrames.length} frames…`
+              );
+            }
           );
+
+          if (claudeResult.failed / rawFrames.length > MAX_FAILED_FRAME_RATIO) {
+            throw new Error(
+              `AI analysis failed for ${claudeResult.failed} of ${rawFrames.length} frames. Please try again with a shorter or clearer clip.`
+            );
+          }
+          analyzedFrames = claudeResult.frames;
         }
+
+        setStatusDetail("Calibrating visible pitch window…");
+        const pitchViews = await estimatePitchViews(rawFrames);
+        analyzedFrames = attachPitchViews(analyzedFrames, pitchViews);
 
         setStatus("summarizing");
         setStatusDetail("Building match insights…");
         setProgress(88);
 
+        const keyFrames = await selectKeyFrames(analyzedFrames, frameImages);
+
         const sumRes = await fetch("/api/analyze/summarize", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ frames: analyzedFrames }),
+          body: JSON.stringify({ frames: analyzedFrames, eventReviewWarnings, keyFrames, kitColors: kitConfig }),
         });
 
         if (!sumRes.ok) {
@@ -241,20 +638,36 @@ export default function HomePage() {
         }
 
         const analysis = (await sumRes.json()) as MatchAnalysis;
-        sessionStorage.setItem("matchAnalysis", JSON.stringify(analysis));
+
+        // Add to the in-session library (becomes the active match) instead of a
+        // single global slot, so prior analyses remain switchable.
+        const entry: MatchEntry = {
+          id: analysis.id,
+          title: deriveMatchTitle(analysis),
+          analysis,
+          videoUrl: videoStore.get(),
+          frameImages,
+          denseFrames: [],
+          denseStatus: VISION_WORKER_URL ? "loading" : "idle",
+          createdAt: Date.now(),
+        };
+        matchLibrary.add(entry);
+
         setProgress(100);
         setStatus("done");
+        // Kick off dense per-frame tracking in the background — the dashboard
+        // RAF loop will upgrade from sparse interpolation once it resolves.
+        if (VISION_WORKER_URL) fetchDenseTracking(file, entry.id, kitConfig);
         router.push("/dashboard");
       } catch (err) {
         setErrorMsg(err instanceof Error ? err.message : "Something went wrong.");
         setStatus("error");
       }
     },
-    [router]
+    [awayKitColor, homeKitColor, router]
   );
 
   const handleDemo = useCallback(async () => {
-    videoStore.clear();
     setStatus("analyzing");
     setProgress(10);
 
@@ -268,7 +681,16 @@ export default function HomePage() {
       setProgress(90);
       if (!res.ok) throw new Error("Failed to load demo");
       const analysis = (await res.json()) as MatchAnalysis;
-      sessionStorage.setItem("matchAnalysis", JSON.stringify(analysis));
+      matchLibrary.add({
+        id: analysis.id,
+        title: `${deriveMatchTitle(analysis)} (demo)`,
+        analysis,
+        videoUrl: null,
+        frameImages: new Map(),
+        denseFrames: [],
+        denseStatus: "idle",
+        createdAt: Date.now(),
+      });
       setProgress(100);
       setStatus("done");
       router.push("/dashboard");
@@ -341,6 +763,49 @@ export default function HomePage() {
           {status === "error" && (
             <div className="mb-4 p-4 bg-red-500/10 border border-red-500/30 rounded-xl text-red-400 text-sm">
               {errorMsg}
+            </div>
+          )}
+
+          {!isProcessing && (
+            <div className="mb-4 rounded-xl border border-[#1c3020] bg-[#0b140b] p-4">
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-sm font-semibold text-[#f0fdf4]">Kit colors</p>
+                  <p className="text-xs text-[#6b9e6b]">Used to anchor home/away tracking for this upload.</p>
+                </div>
+                <Users className="h-5 w-5 text-green-400" />
+              </div>
+              <div className="grid grid-cols-2 gap-3" onClick={(e) => e.stopPropagation()}>
+                {[
+                  { id: "home-kit", label: "Home", value: homeKitColor, setValue: setHomeKitColor },
+                  { id: "away-kit", label: "Away", value: awayKitColor, setValue: setAwayKitColor },
+                ].map((control) => {
+                  const selected = KIT_COLORS.find((color) => color.value === control.value);
+                  return (
+                    <label key={control.id} htmlFor={control.id} className="block">
+                      <span className="mb-1 block text-xs uppercase tracking-[0.16em] text-[#6b9e6b]">{control.label}</span>
+                      <div className="flex items-center gap-2 rounded-lg border border-[#1c3020] bg-[#071007] px-3 py-2">
+                        <span
+                          className="h-4 w-4 rounded-full border border-white/20"
+                          style={{ backgroundColor: selected?.swatch ?? "transparent" }}
+                        />
+                        <select
+                          id={control.id}
+                          value={control.value}
+                          onChange={(e) => control.setValue(e.target.value as KitColor)}
+                          className="min-w-0 flex-1 bg-transparent text-sm font-medium text-[#f0fdf4] outline-none"
+                        >
+                          {KIT_COLORS.map((color) => (
+                            <option key={color.value} value={color.value} className="bg-[#071007] text-[#f0fdf4]">
+                              {color.label}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </label>
+                  );
+                })}
+              </div>
             </div>
           )}
 

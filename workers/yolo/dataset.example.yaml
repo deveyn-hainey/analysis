@@ -1,0 +1,14 @@
+# Copy this file to dataset.yaml and update the paths for your labeled data.
+# Labels must be in YOLO format:
+# class_id x_center y_center width height
+# where coordinates are normalized from 0 to 1.
+
+path: /absolute/path/to/soccer-dataset
+train: images/train
+val: images/val
+
+names:
+  0: player
+  1: goalkeeper
+  2: referee
+  3: ball

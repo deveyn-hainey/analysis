@@ -17,8 +17,12 @@ export type EventType =
   | "goal"
   | "save"
   | "corner"
+  | "goal-kick"
   | "freekick"
   | "foul"
+  | "card_yellow"
+  | "card_red"
+  | "card_unknown"
   | "offside"
   | "throw-in"
   | "dribble";
@@ -34,9 +38,22 @@ export interface Player {
   id: string;
   number: number;
   team: TeamId;
-  position: Position;
+  position: Position; // image-space % of the broadcast frame (used by the ring overlay)
+  // True pitch coordinates (0-100, x=length/left-goal=0, y=width/top=0) from the
+  // worker's keypoint homography. Present only when calibration succeeded; the
+  // tactical board uses it, the live overlay never does.
+  pitchPosition?: Position;
   action: PlayerAction;
   role: "gk" | "def" | "mid" | "fwd";
+}
+
+// Estimated mapping from a broadcast image crop to true pitch coordinates.
+// Used only as a fallback when keypoint homography did not produce pitchPosition.
+export interface PitchView {
+  lengthMin: number;
+  lengthMax: number;
+  topImageY: number;
+  confidence?: number;
 }
 
 export interface MatchEvent {
@@ -49,17 +66,55 @@ export interface MatchEvent {
   description: string;
   confidence: number;
   isKeyMoment: boolean;
+  semanticLabel?: string;
+  evidenceUsed?: string[];
+  conflicts?: string[];
+  pipelineFlag?: "missed_detection" | "scoreboard_conflict" | "replay_suspected" | "verifier_conflict" | "low_confidence";
+  xg?: number;
+  // How the xG figure was produced: "vision" = Claude looked at the shot frame
+  // (keeper/defender positions, body shape, angle); "positional" = estimateShotXg
+  // formula from event location only.
+  xgSource?: "vision" | "positional";
+  source?: "cv" | "heuristic" | "llm" | "scoreboard" | "fallback";
+}
+
+// Win/draw/loss style projection for the clip. Produced by the vision synthesis
+// model from numeric metrics + key frames, not a hardcoded formula. Scoped to the
+// passage of play in the clip, not a full-match prediction.
+export interface OutcomeProjection {
+  homeWin: number; // 0–100, sums to ~100 with draw + awayWin
+  draw: number;
+  awayWin: number;
+  reasoning: string;
+  source: "vision" | "fallback";
 }
 
 export interface FrameData {
   frameIndex: number;
   timestamp: number;
+  // False for close-ups/replays/cutaways where the worker could not find enough
+  // visible pitch to trust player tracking.
+  isPitchView?: boolean;
+  pitchView?: PitchView;
   players: Player[];
   ballPosition?: Position;
+  // True pitch coordinates for the ball / referees (keypoint homography), mirroring
+  // Player.pitchPosition. Present only when calibration succeeded.
+  pitchBall?: Position;
+  pitchReferees?: Position[];
   events: MatchEvent[];
   possession: TeamId | "contested";
   // Player with closest contact to the ball — used for cross-frame pass counting
   possessingPlayer?: { team: TeamId; playerId: string };
+  // Match officials detected separately from players (currently only populated by
+  // the YOLO worker when the loaded model has a distinct referee class, e.g. soccana).
+  referees?: Position[];
+  // Scoreboard overlay reading for this frame, when legible. Tracked per-frame
+  // (rather than asking Claude to compare across batches) so a goal can be
+  // confirmed deterministically from the score increasing between any two frames,
+  // even when they land in different review batches or a batch's event
+  // confirmation otherwise fails — see synthesizeGoalsFromScoreboard.
+  scoreboard?: { home: number; away: number; homeLabel?: string; awayLabel?: string } | null;
 }
 
 export interface TeamStats {
@@ -73,6 +128,8 @@ export interface TeamStats {
   corners: number;
   goals: number;
   distanceCovered: number; // approx total meters covered by all players this team
+  expectedGoals?: number;
+  metricConfidence?: Partial<Record<"possession" | "passes" | "shots" | "xg" | "distance", number>>;
 }
 
 export interface TeamAnalysis {
@@ -93,6 +150,8 @@ export interface CoachingInsight {
   observation: string;
   recommendation: string;
   affectedTeam: TeamId | "both";
+  source?: "claude" | "fallback";
+  evidenceUsed?: string[];
 }
 
 export interface MatchAnalysis {
@@ -104,8 +163,26 @@ export interface MatchAnalysis {
   awayTeam: TeamAnalysis;
   frames: FrameData[];
   keyEvents: MatchEvent[];
+  eventConflicts?: Array<{
+    timestamp: number;
+    type: EventType;
+    team?: TeamId;
+    description: string;
+    conflicts: string[];
+    evidenceUsed?: string[];
+    pipelineFlag?: MatchEvent["pipelineFlag"];
+  }>;
+  analysisWarnings?: string[];
   insights: CoachingInsight[];
+  outcome?: OutcomeProjection;
+  // 2-3 sentence vision-grounded narrative of what happened in the uploaded clip.
+  clipSummary?: string;
+  // `score` is the full-match scoreboard reading at the end of the clip (may carry
+  // goals scored before the upload). `clipGoals` is only the goals scored within
+  // the uploaded clip (scoreboard delta) — use this for finishing/conversion so
+  // they stay consistent with in-clip shots and xG.
   score: { home: number; away: number };
+  clipGoals: { home: number; away: number };
   processingMethod: "ai" | "demo";
 }
 
@@ -127,4 +204,21 @@ export interface AnalyzeFrameRequest {
 // Payload for final summarize step
 export interface SummarizeRequest {
   frames: FrameData[];
+  // User-selected kit colors for this upload. Used only as context for the vision
+  // synthesis model; "auto" means no reliable color anchor was provided.
+  kitColors?: { homeKitColor?: string; awayKitColor?: string };
+  // Warnings from the /api/analyze/events review step (e.g. a batch's Claude call
+  // failed and fell back to heuristic-only events) — surfaced to the coach instead
+  // of being silently discarded, since it explains why some events lack full review.
+  eventReviewWarnings?: string[];
+  // Curated key frames (downsized JPEG base64) for the vision synthesis pass —
+  // event frames plus evenly-sampled coverage. Lets the summary model actually
+  // see the play instead of reasoning over numbers alone. Omitted → text-only
+  // synthesis fallback.
+  keyFrames?: Array<{ timestamp: number; base64: string }>;
+}
+
+export interface AnalyzeEventsRequest {
+  frames: FrameData[];
+  images: Array<{ base64: string; timestamp: number }>;
 }

@@ -10,6 +10,11 @@ import type {
   AnalyzeRequest,
 } from "@/lib/types";
 import { SAMPLE_ANALYSIS } from "@/lib/sampleData";
+import { fieldPosition } from "@/lib/pitchMapping";
+
+function playerFieldPosition(frame: FrameData, player: FrameData["players"][number]) {
+  return fieldPosition(player.position, player.pitchPosition, frame.pitchView);
+}
 
 // Claude prompt for per-frame analysis
 const FRAME_PROMPT = `You are a professional soccer video analysis system. Analyze this frame from a soccer match.
@@ -162,8 +167,9 @@ function buildHeatmap(teamId: "home" | "away", allFrames: FrameData[]): number[]
   for (const frame of allFrames) {
     for (const p of frame.players) {
       if (p.team !== teamId) continue;
-      const col = Math.min(9, Math.floor(p.position.x / 10));
-      const row = Math.min(9, Math.floor(p.position.y / 10));
+      const position = playerFieldPosition(frame, p);
+      const col = Math.min(9, Math.max(0, Math.floor(position.x / 10)));
+      const row = Math.min(9, Math.max(0, Math.floor(position.y / 10)));
       grid[row][col]++;
     }
   }
@@ -175,13 +181,38 @@ function countEventType(events: MatchEvent[], type: string, team?: "home" | "awa
   return events.filter((e) => e.type === type && (!team || e.team === team)).length;
 }
 
+function scoreFromScoreboard(frames: FrameData[]): { home: number; away: number } | null {
+  let hasReading = false;
+  let home = 0;
+  let away = 0;
+  for (const frame of [...frames].sort((a, b) => a.timestamp - b.timestamp)) {
+    const board = frame.scoreboard;
+    if (
+      !board ||
+      !Number.isFinite(board.home) ||
+      !Number.isFinite(board.away) ||
+      board.home < 0 ||
+      board.away < 0 ||
+      board.home > 20 ||
+      board.away > 20
+    ) {
+      continue;
+    }
+    hasReading = true;
+    home = Math.max(home, board.home);
+    away = Math.max(away, board.away);
+  }
+  return hasReading ? { home, away } : null;
+}
+
 function buildTeamAnalysis(
   id: "home" | "away",
   name: string,
   color: string,
   formation: TeamAnalysis["formation"],
   frames: FrameData[],
-  allEvents: MatchEvent[]
+  allEvents: MatchEvent[],
+  scoreboardScore?: { home: number; away: number } | null
 ): TeamAnalysis {
   const teamEvents = allEvents.filter((e) => e.team === id);
   const passCount = countEventType(teamEvents, "pass");
@@ -189,7 +220,7 @@ function buildTeamAnalysis(
   const possessionFrames = frames.filter((f) => f.possession === id).length;
   const possession = Math.round((possessionFrames / Math.max(frames.length, 1)) * 100);
 
-  const positions = frames.flatMap((f) => f.players.filter((p) => p.team === id).map((p) => p.position));
+  const positions = frames.flatMap((f) => f.players.filter((p) => p.team === id).map((p) => playerFieldPosition(f, p)));
   const avgX = positions.length ? positions.reduce((s, p) => s + p.x, 0) / positions.length : 50;
   const avgY = positions.length ? positions.reduce((s, p) => s + p.y, 0) / positions.length : 50;
 
@@ -212,7 +243,7 @@ function buildTeamAnalysis(
       tackles: countEventType(teamEvents, "tackle"),
       fouls: countEventType(teamEvents, "foul"),
       corners: countEventType(teamEvents, "corner"),
-      goals: countEventType(teamEvents, "goal"),
+      goals: scoreboardScore ? scoreboardScore[id] : countEventType(teamEvents, "goal"),
       distanceCovered: 0,
     },
     heatmap: buildHeatmap(id, frames),
@@ -291,7 +322,44 @@ function buildFallbackInsights(
     });
   }
 
-  return insights.slice(0, 5);
+  return insights.slice(0, 5).map((insight) => enrichInsightEvidence(insight, homeTeam, awayTeam, "fallback"));
+}
+
+function insightTeamNames(insight: CoachingInsight, homeTeam: TeamAnalysis, awayTeam: TeamAnalysis) {
+  if (insight.affectedTeam === "home") return [homeTeam.name];
+  if (insight.affectedTeam === "away") return [awayTeam.name];
+  return [homeTeam.name, awayTeam.name];
+}
+
+function enrichInsightEvidence(
+  insight: CoachingInsight,
+  homeTeam: TeamAnalysis,
+  awayTeam: TeamAnalysis,
+  source: NonNullable<CoachingInsight["source"]>
+): CoachingInsight {
+  const teamNames = insightTeamNames(insight, homeTeam, awayTeam).join(" / ");
+  const evidence = new Set<string>(insight.evidenceUsed ?? []);
+
+  evidence.add(source === "claude" ? "Claude summary model interpreted CV/statistical metrics" : "deterministic fallback insight template");
+  evidence.add(`clip-scoped scoreboard: ${homeTeam.name} ${homeTeam.stats.goals}-${awayTeam.stats.goals} ${awayTeam.name}`);
+
+  if (insight.category === "possession") {
+    evidence.add(`sampled possession: ${homeTeam.name} ${homeTeam.stats.possession}%, ${awayTeam.name} ${awayTeam.stats.possession}%`);
+  } else if (insight.category === "attacking") {
+    evidence.add(`shot stats: ${homeTeam.name} ${homeTeam.stats.shots} shots, ${awayTeam.name} ${awayTeam.stats.shots} shots`);
+  } else if (insight.category === "defensive") {
+    evidence.add(`defensive events: ${homeTeam.name} ${homeTeam.stats.tackles} tackles, ${awayTeam.name} ${awayTeam.stats.tackles} tackles`);
+  } else if (insight.category === "tactical") {
+    evidence.add(`camera-space average positions: ${homeTeam.name} x=${homeTeam.averagePosition.x}, ${awayTeam.name} x=${awayTeam.averagePosition.x}`);
+  }
+
+  evidence.add(`affected team scope: ${teamNames}`);
+
+  return {
+    ...insight,
+    source,
+    evidenceUsed: [...evidence].slice(0, 5),
+  };
 }
 
 async function generateInsights(
@@ -341,7 +409,9 @@ affectedTeam options: home, away, both`;
     // Strip markdown code fences if Claude wrapped the JSON
     const cleaned = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
     const parsed = JSON.parse(cleaned) as CoachingInsight[];
-    return Array.isArray(parsed) && parsed.length > 0 ? parsed : buildFallbackInsights(homeTeam, awayTeam);
+    return Array.isArray(parsed) && parsed.length > 0
+      ? parsed.map((insight) => enrichInsightEvidence(insight, homeTeam, awayTeam, "claude"))
+      : buildFallbackInsights(homeTeam, awayTeam);
   } catch {
     return buildFallbackInsights(homeTeam, awayTeam);
   }
@@ -385,9 +455,10 @@ export async function POST(req: NextRequest) {
     }
 
     const allEvents = analyzedFrames.flatMap((f) => f.events);
+    const scoreboardScore = scoreFromScoreboard(analyzedFrames);
 
-    const homeTeam = buildTeamAnalysis("home", "Home Team", "#3b82f6", "4-3-3", analyzedFrames, allEvents);
-    const awayTeam = buildTeamAnalysis("away", "Away Team", "#ef4444", "4-5-1", analyzedFrames, allEvents);
+    const homeTeam = buildTeamAnalysis("home", "Home Team", "#3b82f6", "4-3-3", analyzedFrames, allEvents, scoreboardScore);
+    const awayTeam = buildTeamAnalysis("away", "Away Team", "#ef4444", "4-5-1", analyzedFrames, allEvents, scoreboardScore);
 
     const insights = await generateInsights(client, homeTeam, awayTeam);
 
@@ -402,6 +473,10 @@ export async function POST(req: NextRequest) {
       keyEvents: allEvents.filter((e) => e.isKeyMoment),
       insights,
       score: {
+        home: scoreboardScore?.home ?? countEventType(allEvents, "goal", "home"),
+        away: scoreboardScore?.away ?? countEventType(allEvents, "goal", "away"),
+      },
+      clipGoals: {
         home: countEventType(allEvents, "goal", "home"),
         away: countEventType(allEvents, "goal", "away"),
       },

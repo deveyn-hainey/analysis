@@ -9,8 +9,8 @@ A computer vision proof-of-concept that converts raw soccer match footage into s
 | Step | Detail |
 |------|--------|
 | **Upload** | Drop any 2–3 minute MP4/WebM/MOV match clip |
-| **Extract** | The browser captures keyframes every 8 s using the Canvas API — no server upload of the full video |
-| **Analyse** | Each frame is sent to Claude Sonnet via the Anthropic API; the model returns player positions, detected actions, and key events as structured JSON |
+| **Extract** | The browser captures sampled keyframes using the Canvas API — no server upload of the full video |
+| **Analyse** | Sampled frames are sent to Claude via the Anthropic API; the model returns player positions, detected actions, and key events as structured JSON |
 | **Dashboard** | Results are rendered as an interactive coaching dashboard: field visualisation, event timeline, team stats, heatmaps, and prioritised coaching recommendations |
 
 ---
@@ -27,17 +27,44 @@ npm install
 
 ### 2. Configure environment
 
-```bash
-cp .env.local.example .env.local
-```
-
-Open `.env.local` and add your Anthropic API key:
+Create `.env.local` locally and add your Anthropic API key:
 
 ```
 ANTHROPIC_API_KEY=sk-ant-...
 ```
 
 Get a key at [console.anthropic.com](https://console.anthropic.com).
+
+Optional model overrides:
+
+```
+ANTHROPIC_FRAME_MODEL=claude-sonnet-4-6
+ANTHROPIC_SUMMARY_MODEL=claude-sonnet-4-6
+NEXT_PUBLIC_VISION_WORKER_URL=http://localhost:8001
+```
+
+Recommended defaults:
+
+- Keep `ANTHROPIC_FRAME_MODEL` on Sonnet while this app still relies on Claude for frame-level vision.
+- Use `ANTHROPIC_SUMMARY_MODEL` for the final coaching insight pass.
+- Set `NEXT_PUBLIC_VISION_WORKER_URL` only when running the optional YOLO worker.
+- Do not use Claude Batch API for the interactive upload path; batches are cheaper, but asynchronous and better suited to background re-analysis.
+
+### Optional YOLO worker
+
+For a free local computer-vision layer:
+
+```bash
+cd workers/yolo
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn app:app --host 0.0.0.0 --port 8001
+```
+
+Then run the web app with `NEXT_PUBLIC_VISION_WORKER_URL=http://localhost:8001`.
+
+This costs nothing beyond local compute/electricity. For deployment, the worker needs a CPU/GPU host; the Next/Vercel app itself should not run YOLO.
 
 ### 3. Run locally
 
@@ -76,8 +103,12 @@ Or use the Vercel dashboard:
 app/
   page.tsx              — Home/upload page; client-side frame extraction
   dashboard/page.tsx    — Interactive analytics dashboard
-  api/analyze/route.ts  — Serverless function: calls Claude Vision per frame,
-                          aggregates MatchAnalysis, generates coaching insights
+  api/analyze/frame/route.ts
+                        — Serverless function: calls Claude Vision for one sampled frame
+  api/analyze/summarize/route.ts
+                        — Aggregates frame data, deduplicates events, generates insights
+  api/analyze/route.ts  — Demo endpoint for precomputed sample data
+  workers/yolo/         — Optional local YOLO worker for free CV preprocessing
 
 components/
   SoccerField.tsx       — SVG field with animated player dots
@@ -97,10 +128,11 @@ lib/
 
 ## Notes
 
-- **Frame budget**: A 3-minute clip at 8 s intervals produces ~22 frames. Each compressed JPEG is <100 KB, well within Vercel's 4.5 MB request limit.
-- **Rate limits**: Frames are analysed sequentially to stay within Claude API rate limits.
+- **Frame budget**: A 2–3 minute clip produces roughly 15–23 sampled frames. Each compressed JPEG is <100 KB.
+- **Rate limits**: Frame calls use bounded browser concurrency and one retry per failed frame.
 - **No video stored server-side**: Only base64 keyframe images are sent; the original video never leaves the browser.
 - **Export**: The dashboard includes a one-click JSON export of the full `MatchAnalysis` object for downstream use in coaching tools.
+- **Accuracy roadmap**: Claude is useful for interpretation, but not ideal as the dense tracker. The next production-grade step is a YOLO-based video worker for player/ball detection, tracking, team classification, and pitch calibration. See [docs/vision-architecture.md](docs/vision-architecture.md).
 
 ---
 

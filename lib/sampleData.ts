@@ -358,6 +358,7 @@ export const SAMPLE_ANALYSIS: MatchAnalysis = {
   videoDuration: 178,
   framesAnalyzed: frames.length,
   score: { home: 1, away: 0 },
+  clipGoals: { home: 1, away: 0 },
   processingMethod: "demo",
   homeTeam: {
     id: "home",
@@ -439,9 +440,9 @@ export const SAMPLE_ANALYSIS: MatchAnalysis = {
       id: "i4",
       category: "possession",
       priority: "medium",
-      title: "City United's pass accuracy drops under pressure",
+      title: "City United's ball retention drops under pressure",
       observation:
-        "Pass accuracy fell to 71% compared to Eagles FC's 84%. Under pressing situations, City United's central midfielders frequently played the ball backwards or conceded possession.",
+        "Ball retention fell to 71% compared to Eagles FC's 84%. Under pressing situations, City United's central midfielders frequently played the ball backwards or conceded possession.",
       recommendation:
         "Introduce high-pressure rondos and 4v2 drills to improve ball retention under press. Focus on the #4 and #10, who combined for 6 of the 7 misplaced passes.",
       affectedTeam: "away",

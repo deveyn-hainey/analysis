@@ -76,6 +76,7 @@ one team's players, the analysis is wrong. Aim: ≥10 home players AND ≥10 awa
 ── PASS COUNTING ──
 One pass = ball visibly leaving a player's foot toward a teammate. Never double-count the same pass.`;
 
+const FRAME_MODEL = process.env.ANTHROPIC_FRAME_MODEL ?? "claude-sonnet-4-6";
 
 interface RawFrameEvent {
   type: string;
@@ -134,8 +135,8 @@ export async function POST(req: NextRequest) {
     });
 
     const response = await client.messages.create({
-      model: "claude-sonnet-4-6",
-      max_tokens: 1500,
+      model: FRAME_MODEL,
+      max_tokens: 1000,
       messages: [{ role: "user", content }],
     });
 
