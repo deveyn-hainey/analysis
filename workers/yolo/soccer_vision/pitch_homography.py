@@ -29,7 +29,7 @@ logger = logging.getLogger("yolo-worker.pitch")
 _ENABLED = os.getenv("ENABLE_PITCH_HOMOGRAPHY", "auto").lower()
 _MODEL_PATH = os.getenv("KEYPOINT_MODEL_PATH", "").strip()
 _HF_REPO = os.getenv("KEYPOINT_HF_REPO", "Adit-jain/Soccana_Keypoint")
-_HF_FILE = os.getenv("KEYPOINT_HF_FILENAME", "best.pt")
+_HF_FILE = os.getenv("KEYPOINT_HF_FILENAME", "Model/weights/best.pt")
 _CONF = float(os.getenv("KEYPOINT_CONFIDENCE", "0.5"))
 
 # Maps our 29 field keypoints (keypoint_constants order) to the sports-lib pitch

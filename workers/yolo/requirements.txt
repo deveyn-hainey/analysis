@@ -1,5 +1,5 @@
 fastapi==0.115.6
-huggingface_hub==0.24.7
+huggingface_hub>=0.24,<1.0
 numpy==1.26.4
 opencv-python-headless==4.10.0.84
 pillow==11.1.0

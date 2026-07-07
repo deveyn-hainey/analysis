@@ -172,3 +172,41 @@ class TestPostprocess:
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+class TestBallTracker:
+    def make_ball(self, x, y, conf, size=10.0):
+        from soccer_vision.schemas import Detection
+        return Detection("ball", conf, (x - size / 2, y - size / 2, x + size / 2, y + size / 2))
+
+    def test_select_none_when_empty(self):
+        from soccer_vision.ball import BallTracker
+        assert BallTracker().select([], 1920, 1080) is None
+
+    def test_select_prefers_confidence_without_history(self):
+        from soccer_vision.ball import BallTracker
+        t = BallTracker()
+        weak, strong = self.make_ball(100, 100, 0.2), self.make_ball(900, 500, 0.6)
+        assert t.select([weak, strong], 1920, 1080) is strong
+        assert t.last_center == (900.0, 500.0)
+
+    def test_select_prefers_nearby_over_distant_similar_confidence(self):
+        from soccer_vision.ball import BallTracker
+        t = BallTracker()
+        t.select([self.make_ball(900, 500, 0.6)], 1920, 1080)
+        near, far = self.make_ball(920, 510, 0.30), self.make_ball(100, 100, 0.35)
+        assert t.select([near, far], 1920, 1080) is near
+
+    def test_low_confidence_teleport_rejected(self):
+        from soccer_vision.ball import BallTracker
+        t = BallTracker()
+        t.select([self.make_ball(900, 500, 0.6)], 1920, 1080)
+        teleport = self.make_ball(50, 50, 0.11)
+        assert t.select([teleport], 1920, 1080) is None
+
+    def test_miss_counter_resets_on_accept(self):
+        from soccer_vision.ball import BallTracker
+        t = BallTracker()
+        t.misses = 5
+        t.select([self.make_ball(900, 500, 0.6)], 1920, 1080)
+        assert t.misses == 0

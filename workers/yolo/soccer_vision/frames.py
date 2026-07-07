@@ -4,6 +4,7 @@ from typing import Any, Literal, Optional, Union
 import numpy as np
 from PIL import Image
 
+from .ball import BallTracker
 from .detection import decode_frame, detections_for_image, split_detections
 from .geometry import box_area, player_role, position_from_box
 from .pitch_homography import attach_pitch_positions
@@ -20,6 +21,7 @@ def analyze_precomputed_frame(
     teams: list[TeamId],
     is_pitch_view: bool = True,
     pitch_mask: Optional[np.ndarray] = None,
+    ball_tracker: Optional[BallTracker] = None,
 ) -> dict[str, Any]:
     width, height = image.size
     person_detections, ball_detections, referee_detections = split_detections(detections)
@@ -46,8 +48,13 @@ def analyze_precomputed_frame(
         )
 
     ball_position = None
-    if ball_detections:
-        best_ball = max(ball_detections, key=lambda d: d.confidence)
+    if ball_tracker is not None:
+        best_ball = ball_tracker.select(ball_detections, width, height)
+        if best_ball is None and is_pitch_view:
+            best_ball = ball_tracker.recover(image)
+    else:
+        best_ball = max(ball_detections, key=lambda d: d.confidence) if ball_detections else None
+    if best_ball is not None:
         ball_position = position_from_box(best_ball.xyxy, width, height)
 
     possession: Union[TeamId, Literal["contested"]] = "contested"

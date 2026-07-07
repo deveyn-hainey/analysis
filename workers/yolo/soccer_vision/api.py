@@ -11,6 +11,7 @@ from PIL import Image
 import numpy as np
 
 from . import config, models
+from .ball import BallTracker
 from .config import logger
 from .detection import decode_frame, detections_for_image, detections_for_ultralytics_result, split_detections
 from .frames import analyze_precomputed_frame
@@ -31,8 +32,15 @@ app.add_middleware(
 
 
 @app.get("/health")
-def health() -> dict[str, str]:
-    return {"status": "ok", "model": config.MODEL_PATH or "soccana (default)"}
+def health() -> dict[str, Any]:
+    from .pitch_homography import _projector
+
+    _projector._ensure()
+    return {
+        "status": "ok",
+        "model": config.MODEL_PATH or "soccana (default)",
+        "pitchHomography": _projector.available,
+    }
 
 
 @app.post("/analyze-video")
@@ -110,6 +118,7 @@ def analyze_video_file(
         # ── Pass 2: dense tracking at target fps ────────────────────────────────
         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
         dense_frames: list[dict[str, Any]] = []
+        ball_tracker = BallTracker()
         tracks: dict[TeamId, list[TrackState]] = {"home": [], "away": []}
         next_ids: dict[TeamId, int] = {"home": 0, "away": 0}
         previous_possession: Union[TeamId, Literal["contested"]] = "contested"
@@ -137,7 +146,7 @@ def analyze_video_file(
                 teams = assign_teams(img, person_dets, global_centroids, home_kit_color, away_kit_color)
 
                 raw = RawFrame(base64="", timestamp=timestamp)
-                frame = analyze_precomputed_frame(raw, output_idx, img, dets, teams, pitch_mask is not None, pitch_mask)
+                frame = analyze_precomputed_frame(raw, output_idx, img, dets, teams, pitch_mask is not None, pitch_mask, ball_tracker)
                 frame = stabilize_player_ids(frame, tracks, next_ids)
                 if config.TRACK_DIAGNOSTICS and output_idx % config.TRACK_DIAGNOSTIC_EVERY == 0:
                     diag = frame.get("_trackingDiagnostics", {})
@@ -187,7 +196,7 @@ def analyze_video_file(
                     teams = assign_teams(img, person_dets, global_centroids, home_kit_color, away_kit_color)
 
                     raw = RawFrame(base64="", timestamp=timestamp)
-                    frame = analyze_precomputed_frame(raw, output_idx, img, dets, teams, pitch_mask is not None, pitch_mask)
+                    frame = analyze_precomputed_frame(raw, output_idx, img, dets, teams, pitch_mask is not None, pitch_mask, ball_tracker)
                     frame = stabilize_player_ids(frame, tracks, next_ids)
                     frame["possession"] = smooth_possession(frame, previous_possession)
                     previous_possession = frame["possession"]
@@ -244,6 +253,7 @@ def analyze_frames(request: AnalyzeFramesRequest) -> dict[str, Any]:
     # both teams to cluster reliably on its own, and a bad frame then only costs that
     # one frame instead of corrupting team assignment for the whole video.
     frames = []
+    ball_tracker = BallTracker()
     home_kit_color, away_kit_color = request_kit_colors(request.homeKitColor, request.awayKitColor)
     tracks: dict[TeamId, list[TrackState]] = {"home": [], "away": []}
     next_ids: dict[TeamId, int] = {"home": 0, "away": 0}
@@ -254,7 +264,7 @@ def analyze_frames(request: AnalyzeFramesRequest) -> dict[str, Any]:
         detections = filter_persons_to_pitch(image, detections_for_image(image), pitch_mask)
         person_detections, _, _ = split_detections(detections)
         teams = assign_teams(image, person_detections, None, home_kit_color, away_kit_color)
-        frame = analyze_precomputed_frame(raw_frame, i, image, detections, teams, pitch_mask is not None, pitch_mask)
+        frame = analyze_precomputed_frame(raw_frame, i, image, detections, teams, pitch_mask is not None, pitch_mask, ball_tracker)
         frame = stabilize_player_ids(frame, tracks, next_ids)
         frame["possession"] = smooth_possession(frame, previous_possession)
         previous_possession = frame["possession"]
