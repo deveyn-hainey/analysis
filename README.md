@@ -27,7 +27,7 @@ npm install
 
 ### 2. Configure environment
 
-Create `.env.local` locally and add your Anthropic API key:
+Copy `.env.example` to `.env.local` and add your Anthropic API key:
 
 ```
 ANTHROPIC_API_KEY=sk-ant-...
@@ -63,6 +63,10 @@ uvicorn app:app --host 0.0.0.0 --port 8001
 ```
 
 Then run the web app with `NEXT_PUBLIC_VISION_WORKER_URL=http://localhost:8001`.
+
+The worker defaults to a fine-tuned soccer detector (Player/Ball/Referee) that
+auto-downloads on first run; see `workers/yolo/README.md` for its module layout
+and tuning knobs.
 
 This costs nothing beyond local compute/electricity. For deployment, the worker needs a CPU/GPU host; the Next/Vercel app itself should not run YOLO.
 
@@ -108,7 +112,12 @@ app/
   api/analyze/summarize/route.ts
                         — Aggregates frame data, deduplicates events, generates insights
   api/analyze/route.ts  — Demo endpoint for precomputed sample data
-  workers/yolo/         — Optional local YOLO worker for free CV preprocessing
+
+workers/yolo/
+  app.py                — Uvicorn entrypoint for the optional local CV worker
+  soccer_vision/        — Vision pipeline package (config, detection, teams,
+                          tracking, pitch homography, postprocessing, API)
+  tests/                — Unit tests for the pure pipeline modules
 
 components/
   SoccerField.tsx       — SVG field with animated player dots
