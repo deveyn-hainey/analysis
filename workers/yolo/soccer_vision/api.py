@@ -22,7 +22,15 @@ from .jobs import Job, create_job, get_job
 from .pitch_mask import compute_pitch_mask, filter_persons_to_pitch
 from .postprocess import run_postprocessing
 from .schemas import AnalyzeFramesRequest, RawFrame, TeamId, TrackState
-from .teams import assign_teams, crop_jersey_features, request_kit_colors, split_teams
+from .teams import (
+    assign_teams,
+    crop_jersey_color_signature,
+    crop_jersey_features,
+    kit_color_signature,
+    request_kit_colors,
+    split_teams,
+)
+from .teams_siglip import SiglipTeamClassifier, crops_for_detections
 from .tracking import smooth_possession, stabilize_player_ids
 
 app = FastAPI(title="SoccerVision YOLO Worker")
@@ -50,6 +58,36 @@ def health() -> dict[str, Any]:
         "device": models.DEVICE,
         "pitchHomography": _projector.available,
     }
+
+
+def _map_clusters_to_teams(
+    labels: np.ndarray,
+    cal_features: list[np.ndarray],
+    cal_signatures: list[np.ndarray],
+    global_centroids: Optional[tuple[np.ndarray, np.ndarray]],
+    home_kit_color: str,
+    away_kit_color: str,
+) -> dict[int, TeamId]:
+    """Decide which SigLIP cluster is "home". KMeans labels are arbitrary per
+    clip, so anchor them: to the configured kit colours when both are given,
+    otherwise to the HSV calibration centroids (which define home/away for the
+    rest of the pipeline)."""
+    home_sig = kit_color_signature(home_kit_color)
+    away_sig = kit_color_signature(away_kit_color)
+    if home_sig is not None and away_sig is not None:
+        mean0 = np.mean([s for s, l in zip(cal_signatures, labels) if l == 0], axis=0)
+        mean1 = np.mean([s for s, l in zip(cal_signatures, labels) if l == 1], axis=0)
+        same = float(np.linalg.norm(mean0 - home_sig) + np.linalg.norm(mean1 - away_sig))
+        swap = float(np.linalg.norm(mean0 - away_sig) + np.linalg.norm(mean1 - home_sig))
+        return {0: "home", 1: "away"} if same <= swap else {0: "away", 1: "home"}
+    if global_centroids is not None:
+        home_c, away_c = global_centroids
+        mean0 = np.mean([f for f, l in zip(cal_features, labels) if l == 0], axis=0)
+        mean1 = np.mean([f for f, l in zip(cal_features, labels) if l == 1], axis=0)
+        same = float(np.linalg.norm(mean0 - home_c) + np.linalg.norm(mean1 - away_c))
+        swap = float(np.linalg.norm(mean0 - away_c) + np.linalg.norm(mean1 - home_c))
+        return {0: "home", 1: "away"} if same <= swap else {0: "away", 1: "home"}
+    return {0: "home", 1: "away"}
 
 
 def _run_dense_analysis(
@@ -82,6 +120,8 @@ def _run_dense_analysis(
         cal_step = max(1, total_frames // n_cal)
         cal_indices = list(range(0, total_frames, cal_step))[:n_cal]
         all_cal_features: list[np.ndarray] = []
+        cal_crops: list[Image.Image] = []
+        cal_signatures: list[np.ndarray] = []
 
         for idx in cal_indices:
             cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
@@ -93,6 +133,9 @@ def _run_dense_analysis(
             dets = filter_persons_to_pitch(img, detections_for_image(img), pitch_mask)
             person_dets, _, _ = split_detections(dets)
             all_cal_features.extend(crop_jersey_features(img, d.xyxy) for d in person_dets)
+            if config.TEAM_BACKEND == "siglip":
+                cal_crops.extend(crops_for_detections(img, [d.xyxy for d in person_dets]))
+                cal_signatures.extend(crop_jersey_color_signature(img, d.xyxy) for d in person_dets)
             job.update()  # heartbeat so a calibration stall is visible
 
         global_centroids: Optional[tuple[np.ndarray, np.ndarray]] = None
@@ -109,6 +152,31 @@ def _run_dense_analysis(
                     "job %s: global HSV centroids built — home n=%d, away n=%d",
                     job.id, len(home_feats), len(away_feats),
                 )
+
+        # SigLIP team classifier: trained once on calibration crops, applied per
+        # frame below. Any failure (missing deps, too few crops, degenerate
+        # clusters) leaves it untrained and the HSV path takes over.
+        team_classifier: Optional[SiglipTeamClassifier] = None
+        cluster_to_team: dict[int, TeamId] = {0: "home", 1: "away"}
+        if config.TEAM_BACKEND == "siglip" and cal_crops:
+            classifier = SiglipTeamClassifier()
+            cal_labels = classifier.fit_predict(cal_crops)
+            if cal_labels is not None:
+                cluster_to_team = _map_clusters_to_teams(
+                    cal_labels, all_cal_features, cal_signatures,
+                    global_centroids, home_kit_color, away_kit_color,
+                )
+                team_classifier = classifier
+                logger.info("job %s: siglip team mapping %s", job.id, cluster_to_team)
+
+        def classify_teams(img: Image.Image, person_dets) -> list[TeamId]:
+            if team_classifier is not None and person_dets:
+                labels = team_classifier.predict(
+                    crops_for_detections(img, [d.xyxy for d in person_dets])
+                )
+                if labels is not None:
+                    return [cluster_to_team[int(label)] for label in labels]
+            return assign_teams(img, person_dets, global_centroids, home_kit_color, away_kit_color)
 
         # ── Pass 2: dense tracking at target fps ────────────────────────────────
         job.update(stage="tracking")
@@ -142,7 +210,7 @@ def _run_dense_analysis(
                 pitch_mask = compute_pitch_mask(img)
                 dets = filter_persons_to_pitch(img, detections_for_ultralytics_result(result), pitch_mask)
                 person_dets, _, _ = split_detections(dets)
-                teams = assign_teams(img, person_dets, global_centroids, home_kit_color, away_kit_color)
+                teams = classify_teams(img, person_dets)
 
                 raw = RawFrame(base64="", timestamp=timestamp)
                 frame = analyze_precomputed_frame(raw, output_idx, img, dets, teams, pitch_mask is not None, pitch_mask, ball_tracker)
@@ -170,7 +238,7 @@ def _run_dense_analysis(
                     pitch_mask = compute_pitch_mask(img)
                     dets = filter_persons_to_pitch(img, detections_for_image(img), pitch_mask)
                     person_dets, _, _ = split_detections(dets)
-                    teams = assign_teams(img, person_dets, global_centroids, home_kit_color, away_kit_color)
+                    teams = classify_teams(img, person_dets)
 
                     raw = RawFrame(base64="", timestamp=timestamp)
                     frame = analyze_precomputed_frame(raw, output_idx, img, dets, teams, pitch_mask is not None, pitch_mask, ball_tracker)

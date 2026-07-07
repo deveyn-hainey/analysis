@@ -53,10 +53,15 @@ REFEREE_CLASSES = {name.strip().lower() for name in os.getenv("YOLO_REFEREE_CLAS
 HOME_KIT_COLOR = os.getenv("YOLO_HOME_KIT_COLOR", "").strip().lower()
 AWAY_KIT_COLOR = os.getenv("YOLO_AWAY_KIT_COLOR", "").strip().lower()
 MAX_PLAYERS_PER_TEAM = int(os.getenv("YOLO_MAX_PLAYERS_PER_TEAM", "11"))
+# "siglip" trains a SigLIP+UMAP+KMeans classifier per clip (stronger, needs
+# transformers/umap-learn); "hsv" is the lightweight histogram clustering.
+TEAM_BACKEND = os.getenv("YOLO_TEAM_BACKEND", "siglip").lower()
 
 # ── Tracking / smoothing ─────────────────────────────────────────────────────
 DEFAULT_DENSE_FPS = float(os.getenv("YOLO_DENSE_FPS", "15"))
-TRACKER_CONFIG = os.getenv("YOLO_TRACKER", str(WORKER_DIR / "bytetrack_soccer.yaml"))
+# BoT-SORT + ReID keeps player IDs stable through occlusions; set YOLO_TRACKER
+# to bytetrack_soccer.yaml to fall back to the lighter IoU-only tracker.
+TRACKER_CONFIG = os.getenv("YOLO_TRACKER", str(WORKER_DIR / "botsort_soccer.yaml"))
 TRACK_SMOOTHING_ALPHA = float(os.getenv("YOLO_TRACK_SMOOTHING_ALPHA", "0.35"))
 BALL_INTERPOLATION_LIMIT = int(os.getenv("YOLO_BALL_INTERPOLATION_LIMIT", "30"))
 # Max consecutive frames a player can be missing before we stop coasting their

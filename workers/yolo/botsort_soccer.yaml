@@ -1,0 +1,22 @@
+# BoT-SORT config tuned for soccer broadcast footage, with re-identification.
+# vs the previous bytetrack_soccer.yaml:
+#   with_reid + model: auto — matches players by appearance (using the detector's
+#                        own features) after occlusion, so IDs survive players
+#                        crossing/overlapping instead of swapping. This is the
+#                        main upgrade for "players don't track well".
+#   gmc_method: sparseOptFlow — compensates for broadcast camera pans, so a
+#                        panning camera doesn't read as every player moving.
+#   track_buffer: 120  — holds lost tracks ~4s at 30fps, recovering IDs after
+#                        occlusion or brief cutaways.
+tracker_type: botsort
+track_high_thresh: 0.25
+track_low_thresh: 0.1
+new_track_thresh: 0.25
+track_buffer: 120
+match_thresh: 0.6
+fuse_score: True
+gmc_method: sparseOptFlow
+proximity_thresh: 0.5
+appearance_thresh: 0.8
+with_reid: True
+model: auto

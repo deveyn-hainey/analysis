@@ -6,6 +6,10 @@ pillow==11.1.0
 python-multipart==0.0.20
 setuptools==80.9.0
 git+https://github.com/roboflow/sports.git
-ultralytics==8.3.59
+# SigLIP team classification (YOLO_TEAM_BACKEND=siglip, the default)
+transformers==4.57.6
+umap-learn==0.5.12
+scikit-learn==1.6.1
+ultralytics==8.4.90
 uvicorn[standard]==0.34.0
 yolov5==7.0.14
