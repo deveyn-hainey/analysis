@@ -14,6 +14,7 @@ footage:
    larger relative to the input, and maps the hit back to full-frame coords.
 """
 import os
+import threading
 from typing import Optional
 
 import numpy as np
@@ -35,6 +36,22 @@ BALL_DISTANCE_PENALTY = float(os.getenv("YOLO_BALL_DISTANCE_PENALTY", "1.5"))
 # A jump farther than this fraction of the frame diagonal in one step needs
 # clearly higher confidence to be believed.
 BALL_MAX_PLAUSIBLE_JUMP = float(os.getenv("YOLO_BALL_MAX_PLAUSIBLE_JUMP", "0.35"))
+
+
+_recovery_model = None
+_recovery_lock = threading.Lock()
+
+
+def _get_recovery_model():
+    # Dedicated instance: recovery runs while the dense job's model is inside a
+    # streaming track() generator, and Ultralytics predictors are not reentrant.
+    global _recovery_model
+    with _recovery_lock:
+        if _recovery_model is None:
+            from . import models
+
+            _recovery_model = models.new_model_instance()
+        return _recovery_model
 
 
 def _center(box: tuple[float, float, float, float]) -> tuple[float, float]:
@@ -96,6 +113,7 @@ class BallTracker:
         from . import models
         if models.use_huggingface_yolov5():
             return None
+        recovery_model = _get_recovery_model()
 
         width, height = image.size
         side = max(64, int(max(width, height) * BALL_RECOVERY_CROP_FRAC))
@@ -105,7 +123,7 @@ class BallTracker:
         crop = image.crop((x1, y1, x1 + side, y1 + side))
 
         try:
-            result = models.model.predict(
+            result = recovery_model.predict(
                 source=np.asarray(crop),
                 conf=config.BALL_CONFIDENCE * 0.8,
                 imgsz=640,

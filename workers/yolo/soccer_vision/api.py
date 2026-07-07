@@ -120,7 +120,11 @@ def _run_dense_analysis(
         previous_possession: Union[TeamId, Literal["contested"]] = "contested"
 
         if not models.use_huggingface_yolov5():
-            tracked_results = models.model.track(
+            # Own instance: the request-serving endpoints (/analyze-frames, live
+            # tracking) share the global model, and a streaming track() on it
+            # would deadlock with their predict() calls.
+            job_model = models.new_model_instance()
+            tracked_results = job_model.track(
                 source=tmp_path,
                 stream=True,
                 persist=True,

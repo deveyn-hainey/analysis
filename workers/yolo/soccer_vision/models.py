@@ -78,7 +78,11 @@ def resolve_ultralytics_model_path() -> str:
     return hf_hub_download(repo_id=config.MODEL_PATH, filename=config.HF_FILENAME)
 
 
+RESOLVED_MODEL_PATH: str = ""
+
+
 def load_model():
+    global RESOLVED_MODEL_PATH
     if use_huggingface_yolov5():
         import yolov5
 
@@ -88,10 +92,25 @@ def load_model():
 
     from ultralytics import YOLO
 
-    return YOLO(resolve_ultralytics_model_path())
+    RESOLVED_MODEL_PATH = resolve_ultralytics_model_path()
+    return YOLO(RESOLVED_MODEL_PATH)
 
 
 model = load_model()
+
+
+def new_model_instance():
+    """A fresh YOLO instance sharing the same weights file.
+
+    Ultralytics models are stateful: a streaming ``model.track()`` generator
+    and any other ``predict()``/``track()`` call must never share one instance,
+    or they corrupt each other's predictor state and can deadlock. Long-running
+    jobs and auxiliary passes (ball recovery) therefore get their own instance;
+    the weights file itself is cached on disk, so this is cheap.
+    """
+    from ultralytics import YOLO
+
+    return YOLO(RESOLVED_MODEL_PATH or resolve_ultralytics_model_path())
 
 
 def _validate_class_config() -> None:
