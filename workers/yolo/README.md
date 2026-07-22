@@ -20,6 +20,27 @@ Then run the Next app with:
 NEXT_PUBLIC_VISION_WORKER_URL=http://localhost:8001 npm run dev
 ```
 
+## Code layout
+
+`app.py` is only the uvicorn entrypoint. The pipeline lives in the
+`soccer_vision/` package, organized the same way as the sibling
+`Soccer_Analysis_Model` repo:
+
+| Module | Responsibility |
+| --- | --- |
+| `config.py` | every env-tunable knob, in one place |
+| `models.py` | detector loading — fine-tuned soccana by default |
+| `schemas.py` | request/response models, `Detection` type |
+| `geometry.py` | pure coordinate math (positions, roles, lerp, mirroring) |
+| `pitch_mask.py` | green-pitch gating of person detections |
+| `detection.py` | YOLO inference → `Detection` lists |
+| `teams.py` | jersey-colour team assignment (clustering + kit anchoring) |
+| `tracking.py` | stable ID assignment, XI pruning, possession smoothing |
+| `postprocess.py` | clip-level interpolation/consolidation passes |
+| `frames.py` | per-frame FrameData assembly |
+| `pitch_homography.py` | 29-keypoint homography onto true pitch coordinates |
+| `api.py` | FastAPI routes |
+
 ## Cost
 
 - Local CPU: free beyond electricity, but slower.
@@ -28,18 +49,13 @@ NEXT_PUBLIC_VISION_WORKER_URL=http://localhost:8001 npm run dev
 
 ## Model
 
-Default:
+**Default: the fine-tuned soccana model** ([Adit-jain/soccana](https://huggingface.co/Adit-jain/soccana)), a YOLOv11 model trained on broadcast soccer with `Player` / `Ball` / `Referee` classes. With `YOLO_MODEL_PATH` unset, the worker resolves it in this order:
 
-```bash
-YOLO_MODEL_PATH=yolo11n.pt
-```
+1. a local `soccana.pt` next to the worker (if you've already downloaded it),
+2. an automatic Hugging Face Hub download of `Adit-jain/soccana` `Model/weights/best.pt`,
+3. generic COCO `yolo11n.pt` as a last-resort fallback (logged loudly — expect much worse ball/referee detection).
 
-This is a generic COCO model. It can detect people and sports balls, but it is not soccer-specialized. For better accuracy, replace it with a fine-tuned soccer detector that has classes such as:
-
-- player
-- goalkeeper
-- referee
-- ball
+To use different weights, set the path explicitly:
 
 ```bash
 YOLO_MODEL_PATH=/path/to/soccer-best.pt uvicorn app:app --host 0.0.0.0 --port 8001

@@ -40,3 +40,13 @@ next-env.d.ts
 # keys
 .env
 .env*
+
+# Misc / screenshots
+Screenshot*.png
+
+# Model weights — downloaded from HF Hub on first run, never committed
+*.pt
+
+# Python
+__pycache__/
+*.pyc
